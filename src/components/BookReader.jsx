@@ -1,11 +1,16 @@
 import { useEffect, useCallback } from "react";
+import { getInsightImage } from "../data/insightArt.js";
+import KaraokeStory from "./KaraokeStory.jsx";
 
 export default function BookReader({ book, page, onPageChange, onClose }) {
   const totalInsights = book.insights?.length || 0;
-  // page 0 = cover, 1..N = insights
   const maxPage = totalInsights;
   const isCover = page === 0;
   const insight = !isCover ? book.insights[page - 1] : null;
+  const insightArt =
+    !isCover && insight
+      ? getInsightImage(book.number, page - 1)
+      : null;
 
   const goPrev = useCallback(() => {
     onPageChange(Math.max(0, page - 1));
@@ -18,6 +23,8 @@ export default function BookReader({ book, page, onPageChange, onClose }) {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Escape") onClose();
+      // Don't steal arrows while user might be interacting with audio controls
+      if (e.target?.tagName === "INPUT" || e.target?.tagName === "TEXTAREA") return;
       if (e.key === "ArrowLeft") goPrev();
       if (e.key === "ArrowRight") goNext();
     };
@@ -82,12 +89,22 @@ export default function BookReader({ book, page, onPageChange, onClose }) {
               </button>
             </div>
           ) : (
-            <article className="insight-page" key={page}>
+            <article className="insight-page" key={`${book.id}-${page}`}>
               <p className="insight-number">
                 {String(page).padStart(2, "0")}
               </p>
               <h3 className="insight-title">{insight.title}</h3>
-              <p className="insight-story">{insight.story}</p>
+
+              <figure className="insight-art">
+                <img
+                  src={insightArt}
+                  alt="Japanese ink painting with red accent — life and beauty"
+                  loading="eager"
+                />
+                <figcaption>墨 · sumi · life & beauty</figcaption>
+              </figure>
+
+              <KaraokeStory text={insight.story} title={insight.title} />
             </article>
           )}
         </div>

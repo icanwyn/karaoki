@@ -18,8 +18,19 @@ A beautifully designed digital library curating **100 essential books** on how t
 
 ```bash
 npm install
+cp .env.example .env.local   # add ELEVENLABS_API_KEY for studio voice
 npm run dev
 ```
+
+### ElevenLabs karaoke narration
+
+Each insight page has **Listen** — words light up like karaoke while the story is read aloud.
+
+1. Create an API key at [elevenlabs.io](https://elevenlabs.io)
+2. Local: put `ELEVENLABS_API_KEY=...` in `.env.local`
+3. Production: add the same env var in the Vercel project settings
+
+Without a key, the app falls back to the browser’s built-in speech voice with estimated word timings so the karaoke UI still works.
 
 ## Build
 

@@ -1027,40 +1027,79 @@ body::before {
   }
 }
 
-/* ── Insight art ── */
+/* ── Insight art (shan shui portrait + caption bar) ── */
 .insight-art {
   margin: 0 0 1.5rem;
-  border-radius: 14px;
+  border-radius: 16px;
   overflow: hidden;
   border: 1px solid rgba(26, 26, 26, 0.08);
   box-shadow:
-    0 16px 40px rgba(40, 30, 20, 0.1),
+    0 16px 40px rgba(40, 30, 20, 0.12),
     inset 0 0 0 1px rgba(255, 255, 255, 0.35);
-  background: #1a1a1a;
+  background: #0e0e10;
   position: relative;
+  /* Fixed frame so karaoke reflows never resize the art */
+  contain: layout paint;
 }
 
-.insight-art img {
+.insight-art-frame {
+  position: relative;
   width: 100%;
-  display: block;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-  filter: contrast(1.05) saturate(0.95);
+  aspect-ratio: 9 / 14;
+  max-height: min(52vh, 420px);
+  background: #111;
 }
 
-.insight-art figcaption {
+.insight-art-frame img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  object-position: center 40%;
+  filter: contrast(1.04) saturate(0.92);
+}
+
+.insight-caption-bar {
   position: absolute;
-  right: 0.75rem;
-  bottom: 0.55rem;
-  font-size: 0.65rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: rgba(255, 250, 240, 0.72);
-  background: rgba(20, 16, 12, 0.35);
-  backdrop-filter: blur(8px);
-  padding: 0.25rem 0.55rem;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1.35rem 1rem 1rem;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(8, 8, 10, 0.55) 28%,
+    rgba(6, 6, 8, 0.88) 100%
+  );
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.insight-caption-line {
+  font-family: var(--sans);
+  font-size: clamp(0.72rem, 2.4vw, 0.88rem);
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  color: rgba(220, 220, 224, 0.88);
+  text-align: center;
+  line-height: 1.45;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
+  max-width: 100%;
+}
+
+.insight-keyword-pill {
+  display: inline-block;
+  background: #c23b22;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 0.12em 0.55em;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  margin: 0 0.15em;
+  box-shadow: 0 2px 10px rgba(194, 59, 34, 0.45);
+  vertical-align: baseline;
 }
 
 /* ── Karaoke listen bar ── */
@@ -1138,9 +1177,12 @@ body::before {
   font-family: var(--sans);
 }
 
-/* ── Karaoke words ── */
-.karaoke-text {
-  /* override first-letter float when karaoke is active for cleaner highlight */
+/* ── Karaoke words (NO transform/scale — prevents page shake) ── */
+.insight-story.karaoke-text {
+  line-height: 1.9;
+  /* Isolate paint so highlight doesn't thrash the whole reader */
+  contain: content;
+  will-change: auto;
 }
 
 .insight-story.karaoke-text::first-letter {
@@ -1153,31 +1195,32 @@ body::before {
 }
 
 .k-word {
-  transition:
-    color 0.12s ease,
-    background-color 0.12s ease,
-    box-shadow 0.12s ease,
-    transform 0.12s ease;
-  border-radius: 4px;
-  padding: 0 0.04em;
+  /* Fixed padding always — active state must not change box size */
+  display: inline;
+  padding: 0.05em 0.1em;
+  margin: 0;
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  font-weight: inherit;
+  background-color: transparent;
+  color: inherit;
+  /* Color-only transitions — no transform, no layout */
+  transition: color 0.1s linear, background-color 0.1s linear;
+  /* Prevent subpixel reflow shake */
+  -webkit-font-smoothing: antialiased;
 }
 
 .k-word.is-past {
-  color: rgba(44, 44, 44, 0.42);
+  color: rgba(44, 44, 44, 0.36);
+  background-color: transparent;
 }
 
 .k-word.is-active {
-  color: var(--ink);
-  background: linear-gradient(
-    180deg,
-    rgba(194, 59, 34, 0.14) 0%,
-    rgba(194, 59, 34, 0.22) 100%
-  );
-  box-shadow:
-    0 0 0 2px rgba(194, 59, 34, 0.2),
-    0 4px 14px rgba(194, 59, 34, 0.12);
-  transform: translateY(-1px);
-  font-weight: 500;
+  color: #fff;
+  background-color: var(--vermillion);
+  /* No transform, no box-shadow, no padding change — zero layout shift */
+  font-weight: inherit;
 }
 
 .visually-hidden {
@@ -1192,12 +1235,12 @@ body::before {
   border: 0;
 }
 
-/* Slightly taller reader for art + karaoke */
 .insight-page {
   max-width: 560px;
+  /* Keep page geometry stable while words highlight */
+  contain: layout;
 }
 
-/* Reader attribution on cover */
 .cover-reader {
   font-family: var(--serif);
   font-size: 1rem;
@@ -1215,25 +1258,6 @@ body::before {
 .cover-reader-style {
   color: var(--ink-faint);
   font-size: 0.92em;
-}
-
-/* Stronger karaoke glow so it's unmistakable */
-.k-word.is-active {
-  color: #1a1a1a !important;
-  background: linear-gradient(
-    180deg,
-    rgba(194, 59, 34, 0.2) 0%,
-    rgba(194, 59, 34, 0.38) 100%
-  ) !important;
-  box-shadow:
-    0 0 0 3px rgba(194, 59, 34, 0.28),
-    0 6px 18px rgba(194, 59, 34, 0.2) !important;
-  transform: translateY(-1px) scale(1.04);
-  border-radius: 5px;
-}
-
-.k-word.is-past {
-  color: rgba(44, 44, 44, 0.38) !important;
 }
 
 .listen-live {
@@ -1256,23 +1280,4 @@ body::before {
   border-radius: 8px;
   background: rgba(194, 59, 34, 0.06);
   border: 1px solid rgba(194, 59, 34, 0.12);
-}
-
-/* Karaoke active word — maximum visibility */
-.karaoke-text.is-reading .k-word {
-  transition: color 0.08s linear, background-color 0.08s linear, box-shadow 0.08s linear;
-}
-
-.k-word.is-active {
-  color: #fff !important;
-  background: var(--vermillion) !important;
-  box-shadow: 0 4px 16px rgba(194, 59, 34, 0.45) !important;
-  transform: translateY(-1px) scale(1.06);
-  border-radius: 4px;
-  padding: 0 0.12em;
-}
-
-.k-word.is-past {
-  color: rgba(44, 44, 44, 0.34) !important;
-  background: transparent !important;
 }

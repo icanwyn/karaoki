@@ -104,7 +104,7 @@ export default function KaraokeStory({ text, reader, bookNumber = 1 }) {
     clearTimer();
     playingRef.current = true;
 
-    // 50ms interval is more reliable than rAF for speech/audio karaoke
+    // ~12fps highlight updates — smooth enough, less layout thrash
     timerRef.current = window.setInterval(() => {
       if (!playingRef.current) return;
 
@@ -124,19 +124,17 @@ export default function KaraokeStory({ text, reader, bookNumber = 1 }) {
           paint(-1);
           return;
         }
-        // Always advance by wall clock while we consider ourselves playing
         paint(indexForTime(timingsRef.current, browser.getCurrentTime()));
         return;
       }
 
-      // Audio finished
       if (audio?.ended) {
         playingRef.current = false;
         clearTimer();
         setPlayStatus("ready");
         paint(-1);
       }
-    }, 50);
+    }, 80);
   }, [paint]);
 
   // Native audio events

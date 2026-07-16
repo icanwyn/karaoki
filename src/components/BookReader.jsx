@@ -1,7 +1,12 @@
 import { useEffect, useCallback, useMemo } from "react";
-import { getInsightImage } from "../data/insightArt.js";
+import {
+  getInsightImage,
+  getInsightKeyword,
+  getInsightArtFilter,
+} from "../data/insightArt.js";
 import { getBookReader } from "../data/readers.js";
 import KaraokeStory from "./KaraokeStory.jsx";
+import InsightArt from "./InsightArt.jsx";
 
 export default function BookReader({ book, page, onPageChange, onClose }) {
   const totalInsights = book.insights?.length || 0;
@@ -11,6 +16,10 @@ export default function BookReader({ book, page, onPageChange, onClose }) {
   const insightArt =
     !isCover && insight
       ? getInsightImage(book.number, page - 1)
+      : null;
+  const insightFilter =
+    !isCover && insight
+      ? getInsightArtFilter(book.number, page - 1)
       : null;
   const reader = useMemo(() => getBookReader(book.number), [book.number]);
 
@@ -101,14 +110,11 @@ export default function BookReader({ book, page, onPageChange, onClose }) {
               </p>
               <h3 className="insight-title">{insight.title}</h3>
 
-              <figure className="insight-art">
-                <img
-                  src={insightArt}
-                  alt="Japanese ink painting with red accent — life and beauty"
-                  loading="eager"
-                />
-                <figcaption>墨 · sumi · life & beauty</figcaption>
-              </figure>
+              <InsightArt
+                src={insightArt}
+                keyword={getInsightKeyword(insight)}
+                filter={insightFilter}
+              />
 
               <KaraokeStory
                 text={insight.story}

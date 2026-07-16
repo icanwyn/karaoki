@@ -1,5 +1,6 @@
-import { useEffect, useCallback } from "react";
+import { useEffect, useCallback, useMemo } from "react";
 import { getInsightImage } from "../data/insightArt.js";
+import { getBookReader } from "../data/readers.js";
 import KaraokeStory from "./KaraokeStory.jsx";
 
 export default function BookReader({ book, page, onPageChange, onClose }) {
@@ -11,6 +12,7 @@ export default function BookReader({ book, page, onPageChange, onClose }) {
     !isCover && insight
       ? getInsightImage(book.number, page - 1)
       : null;
+  const reader = useMemo(() => getBookReader(book.number), [book.number]);
 
   const goPrev = useCallback(() => {
     onPageChange(Math.max(0, page - 1));
@@ -80,6 +82,10 @@ export default function BookReader({ book, page, onPageChange, onClose }) {
                 />
               </div>
               <p className="cover-essence">{book.essence}</p>
+              <p className="cover-reader">
+                Read by <strong>{reader.name}</strong>
+                <span className="cover-reader-style"> · {reader.style}</span>
+              </p>
               <button
                 type="button"
                 className="open-btn"
@@ -104,7 +110,7 @@ export default function BookReader({ book, page, onPageChange, onClose }) {
                 <figcaption>墨 · sumi · life & beauty</figcaption>
               </figure>
 
-              <KaraokeStory text={insight.story} title={insight.title} />
+              <KaraokeStory text={insight.story} reader={reader} />
             </article>
           )}
         </div>

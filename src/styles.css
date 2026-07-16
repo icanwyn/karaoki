@@ -1196,3 +1196,42 @@ body::before {
 .insight-page {
   max-width: 560px;
 }
+
+/* Reader attribution on cover */
+.cover-reader {
+  font-family: var(--serif);
+  font-size: 1rem;
+  color: var(--ink-muted);
+  margin: -0.5rem auto 1.5rem;
+  font-style: italic;
+}
+
+.cover-reader strong {
+  font-style: normal;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.cover-reader-style {
+  color: var(--ink-faint);
+  font-size: 0.92em;
+}
+
+/* Stronger karaoke glow so it's unmistakable */
+.k-word.is-active {
+  color: #1a1a1a !important;
+  background: linear-gradient(
+    180deg,
+    rgba(194, 59, 34, 0.2) 0%,
+    rgba(194, 59, 34, 0.38) 100%
+  ) !important;
+  box-shadow:
+    0 0 0 3px rgba(194, 59, 34, 0.28),
+    0 6px 18px rgba(194, 59, 34, 0.2) !important;
+  transform: translateY(-1px) scale(1.04);
+  border-radius: 5px;
+}
+
+.k-word.is-past {
+  color: rgba(44, 44, 44, 0.38) !important;
+}

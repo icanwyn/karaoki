@@ -1,43 +1,121 @@
 /**
- * Text-to-speech helpers:
- * 1) Prefer ElevenLabs via /api/tts (word timestamps for karaoke)
- * 2) Fallback: browser SpeechSynthesis with estimated word timings
+ * ElevenLabs TTS + karaoke word timings.
+ * Falls back to browser speech if the API is unavailable.
  */
 
 const cache = new Map();
 
-function cacheKey(text) {
-  return text.trim().slice(0, 2000);
-}
-
 export function tokenizeWords(text) {
-  // Keep punctuation attached to words for display; split on whitespace
-  return text.trim().split(/\s+/).filter(Boolean);
+  return (text || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
 }
 
-/** Rough timings when ElevenLabs is unavailable */
-export function estimateWordTimings(text, wordsPerMinute = 145) {
+export function estimateWordTimings(text, wordsPerMinute = 135) {
   const words = tokenizeWords(text);
   const secPerWord = 60 / wordsPerMinute;
-  let t = 0.15;
+  let t = 0.12;
   return words.map((word) => {
-    const lenFactor = Math.min(1.6, Math.max(0.55, word.replace(/\W/g, "").length / 5));
+    const letters = word.replace(/\W/g, "").length || 1;
+    const lenFactor = Math.min(1.75, Math.max(0.5, letters / 4.5));
+    // Story pacing: slightly longer pauses after punctuation
+    const punctBoost = /[,;:]$/.test(word) ? 0.08 : /[.!?]"?$/.test(word) ? 0.18 : 0.03;
     const dur = secPerWord * lenFactor;
     const start = t;
     const end = t + dur;
-    t = end + 0.04;
+    t = end + punctBoost;
     return { word, start, end };
   });
 }
 
-export async function fetchElevenLabsNarration(text) {
-  const key = cacheKey(text);
+/**
+ * Align API timing words to the exact display word list so karaoke indices match 1:1.
+ */
+export function alignTimingsToDisplay(displayWords, timedWords, audioDurationSec) {
+  if (!displayWords.length) return [];
+
+  const timed = (timedWords || [])
+    .map((w) => ({
+      word: w.word,
+      start: Number(w.start) || 0,
+      end: Number(w.end) || Number(w.start) || 0,
+    }))
+    .filter((w) => Number.isFinite(w.start));
+
+  // Perfect or near-perfect match: zip by index
+  if (timed.length && Math.abs(timed.length - displayWords.length) <= 2) {
+    const out = displayWords.map((word, i) => {
+      const src = timed[Math.min(i, timed.length - 1)];
+      return {
+        word,
+        start: src.start,
+        end: Math.max(src.end, src.start + 0.05),
+      };
+    });
+    // Ensure strictly non-decreasing starts (fixes occasional API jitter)
+    for (let i = 1; i < out.length; i++) {
+      if (out[i].start < out[i - 1].start) {
+        out[i].start = out[i - 1].end;
+      }
+      if (out[i].end <= out[i].start) {
+        out[i].end = out[i].start + 0.08;
+      }
+    }
+    return out;
+  }
+
+  // Different lengths: stretch API timeline across display words by character weight
+  if (timed.length > 1) {
+    const t0 = timed[0].start;
+    const t1 = timed[timed.length - 1].end || timed[timed.length - 1].start;
+    const span = Math.max(0.5, t1 - t0);
+    const totalChars = displayWords.reduce((n, w) => n + Math.max(1, w.length), 0);
+    let t = t0;
+    return displayWords.map((word) => {
+      const share = Math.max(1, word.length) / totalChars;
+      const dur = span * share;
+      const start = t;
+      const end = t + dur;
+      t = end;
+      return { word, start, end };
+    });
+  }
+
+  // Estimate from audio duration if known
+  if (audioDurationSec > 0) {
+    const totalChars = displayWords.reduce((n, w) => n + Math.max(1, w.length), 0);
+    let t = 0.05;
+    return displayWords.map((word) => {
+      const share = Math.max(1, word.length) / totalChars;
+      const dur = Math.max(0.08, audioDurationSec * share);
+      const start = t;
+      const end = Math.min(audioDurationSec, t + dur);
+      t = end;
+      return { word, start, end };
+    });
+  }
+
+  return estimateWordTimings(displayWords.join(" "));
+}
+
+function cacheKey(text, voiceId) {
+  return `${voiceId || "default"}::${text.trim().slice(0, 1800)}`;
+}
+
+export async function fetchElevenLabsNarration(text, { voiceId, voiceName } = {}) {
+  const key = cacheKey(text, voiceId);
   if (cache.has(key)) return cache.get(key);
 
   const res = await fetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({
+      text,
+      voiceId,
+      // Storytelling style hint for the server
+      style: "story",
+    }),
   });
 
   const data = await res.json().catch(() => ({}));
@@ -47,30 +125,29 @@ export async function fetchElevenLabsNarration(text) {
     throw err;
   }
 
+  const displayWords = tokenizeWords(text);
+  const rawWords = Array.isArray(data.words) ? data.words : [];
+  const words = alignTimingsToDisplay(displayWords, rawWords, 0);
+
   const result = {
     provider: "elevenlabs",
     audioUrl: `data:${data.contentType || "audio/mpeg"};base64,${data.audioBase64}`,
-    words:
-      data.words?.length > 0
-        ? data.words
-        : estimateWordTimings(text),
+    words,
+    rawWords,
+    voiceId: data.voiceId || voiceId,
+    voiceName: data.voiceName || voiceName || "Storyteller",
   };
   cache.set(key, result);
   return result;
 }
 
-/**
- * Browser speech synthesis fallback with estimated karaoke timings.
- * Returns a controller: { words, play, pause, stop, getCurrentTime, onend }
- */
 export function createBrowserNarration(text) {
   const words = estimateWordTimings(text);
   const utter = new SpeechSynthesisUtterance(text);
-  utter.rate = 0.92;
+  utter.rate = 0.9;
   utter.pitch = 1;
   utter.lang = "en-US";
 
-  // Prefer a calm English voice if available
   const voices = window.speechSynthesis?.getVoices?.() || [];
   const preferred =
     voices.find((v) => /Samantha|Google US English|Karen|Moira|Female/i.test(v.name)) ||
@@ -83,7 +160,6 @@ export function createBrowserNarration(text) {
   let playing = false;
   let ended = false;
   let onEndCb = null;
-  let onBoundary = null;
 
   utter.onstart = () => {
     startWall = performance.now() - pausedAt * 1000;
@@ -99,13 +175,6 @@ export function createBrowserNarration(text) {
     playing = false;
     ended = true;
     onEndCb?.();
-  };
-
-  // Some browsers fire word boundaries
-  utter.onboundary = (ev) => {
-    if (ev.name === "word" && typeof onBoundary === "function") {
-      onBoundary(ev.charIndex, ev.elapsedTime);
-    }
   };
 
   return {
@@ -150,15 +219,15 @@ export function createBrowserNarration(text) {
   };
 }
 
-export async function prepareNarration(text) {
+export async function prepareNarration(text, options = {}) {
   try {
-    return await fetchElevenLabsNarration(text);
+    return await fetchElevenLabsNarration(text, options);
   } catch (err) {
-    // Soft-fail to browser voice so the feature always works
     return {
       provider: "browser",
       audioUrl: null,
       words: estimateWordTimings(text),
+      voiceName: "Browser",
       fallbackReason: err.message,
     };
   }

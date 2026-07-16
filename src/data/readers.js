@@ -23,9 +23,10 @@ export const STORYTELLERS = [
   { id: "IKne3meq5aSn9XLyUdCD", name: "Charlie", style: "deep confident" },
 ];
 
-/** Stable "random" reader per book number */
+/** Stable "random" reader per book — spreads evenly across the roster */
 export function getBookReader(bookNumber = 1) {
   const n = Math.abs(Number(bookNumber) || 1);
-  const idx = (n * 2654435761) >>> 0; // Knuth multiplicative hash
-  return STORYTELLERS[idx % STORYTELLERS.length];
+  // Simple spread: consecutive books get different readers
+  const idx = (n - 1) % STORYTELLERS.length;
+  return STORYTELLERS[idx];
 }

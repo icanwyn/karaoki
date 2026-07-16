@@ -4,53 +4,56 @@ import {
   createBrowserNarration,
   tokenizeWords,
   alignTimingsToDisplay,
+  warmSpeechVoices,
 } from "../lib/tts.js";
 
 function indexForTime(words, t) {
   if (!words?.length) return -1;
-  // Binary-ish scan: last word where start <= t
-  let lo = 0;
-  let hi = words.length - 1;
   let ans = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (words[mid].start <= t + 0.02) {
-      ans = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
+  for (let i = 0; i < words.length; i++) {
+    if ((words[i].start ?? 0) <= t + 0.04) ans = i;
+    else break;
   }
   return ans;
 }
 
-export default function KaraokeStory({ text, reader }) {
-  // Narrate ONLY the story body so display words === timing words
+export default function KaraokeStory({ text, reader, bookNumber = 1 }) {
   const storyText = useMemo(() => (text || "").trim(), [text]);
   const displayWords = useMemo(() => tokenizeWords(storyText), [storyText]);
 
-  const [status, setStatus] = useState("idle"); // idle|loading|ready|playing|paused|error
+  const [status, setStatus] = useState("idle");
   const [provider, setProvider] = useState(null);
   const [activeIdx, setActiveIdx] = useState(-1);
   const [errorMsg, setErrorMsg] = useState("");
   const [voiceLabel, setVoiceLabel] = useState(reader?.name || "Storyteller");
+  const [fallbackNote, setFallbackNote] = useState("");
 
   const audioRef = useRef(null);
   const browserRef = useRef(null);
-  const rafRef = useRef(0);
+  const timerRef = useRef(0);
   const timingsRef = useRef([]);
   const preparedRef = useRef(null);
   const playingRef = useRef(false);
+  const statusRef = useRef("idle");
 
-  const clearRaf = () => {
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = 0;
+  const setPlayStatus = (s) => {
+    statusRef.current = s;
+    setStatus(s);
+  };
+
+  useEffect(() => {
+    warmSpeechVoices();
+  }, []);
+
+  const clearTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = 0;
     }
   };
 
-  const stopAll = useCallback(() => {
-    clearRaf();
+  const stopPlayback = useCallback(() => {
+    clearTimer();
     playingRef.current = false;
     const audio = audioRef.current;
     if (audio) {
@@ -69,106 +72,115 @@ export default function KaraokeStory({ text, reader }) {
   }, []);
 
   useEffect(() => {
-    stopAll();
-    setStatus("idle");
+    stopPlayback();
+    setPlayStatus("idle");
     setProvider(null);
     setErrorMsg("");
+    setFallbackNote("");
     preparedRef.current = null;
     timingsRef.current = [];
     setVoiceLabel(reader?.name || "Storyteller");
     if (audioRef.current) {
       audioRef.current.removeAttribute("src");
-      audioRef.current.load();
+      try {
+        audioRef.current.load();
+      } catch {
+        /* ignore */
+      }
     }
-  }, [storyText, reader?.id, stopAll]);
+  }, [storyText, reader?.id, bookNumber, stopPlayback]);
 
-  useEffect(() => () => stopAll(), [stopAll]);
+  useEffect(() => () => stopPlayback(), [stopPlayback]);
 
-  const updateHighlight = useCallback((t) => {
-    const idx = indexForTime(timingsRef.current, t);
+  const paint = useCallback((idx) => {
+    if (idx < 0) {
+      setActiveIdx(-1);
+      return;
+    }
     setActiveIdx((prev) => (prev === idx ? prev : idx));
   }, []);
 
-  const tick = useCallback(() => {
-    if (!playingRef.current) return;
-
-    const audio = audioRef.current;
-    const browser = browserRef.current;
-
-    if (audio && audio.src && !audio.paused && !audio.ended) {
-      updateHighlight(audio.currentTime);
-      rafRef.current = requestAnimationFrame(tick);
-      return;
-    }
-
-    if (browser && browser.isPlaying()) {
-      updateHighlight(browser.getCurrentTime());
-      rafRef.current = requestAnimationFrame(tick);
-      return;
-    }
-
-    // ended
-    playingRef.current = false;
-    setStatus("ready");
-    setActiveIdx(-1);
-  }, [updateHighlight]);
-
-  const startLoop = useCallback(() => {
-    clearRaf();
+  const startHighlightLoop = useCallback(() => {
+    clearTimer();
     playingRef.current = true;
-    rafRef.current = requestAnimationFrame(tick);
-  }, [tick]);
 
-  // Also wire timeupdate as a reliable secondary path
+    // 50ms interval is more reliable than rAF for speech/audio karaoke
+    timerRef.current = window.setInterval(() => {
+      if (!playingRef.current) return;
+
+      const audio = audioRef.current;
+      const browser = browserRef.current;
+
+      if (audio && audio.src && !audio.paused && !audio.ended) {
+        paint(indexForTime(timingsRef.current, audio.currentTime));
+        return;
+      }
+
+      if (browser) {
+        if (browser.hasEnded?.()) {
+          playingRef.current = false;
+          clearTimer();
+          setPlayStatus("ready");
+          paint(-1);
+          return;
+        }
+        // Always advance by wall clock while we consider ourselves playing
+        paint(indexForTime(timingsRef.current, browser.getCurrentTime()));
+        return;
+      }
+
+      // Audio finished
+      if (audio?.ended) {
+        playingRef.current = false;
+        clearTimer();
+        setPlayStatus("ready");
+        paint(-1);
+      }
+    }, 50);
+  }, [paint]);
+
+  // Native audio events
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
     const onTime = () => {
       if (!playingRef.current) return;
-      updateHighlight(audio.currentTime);
-    };
-    const onPlay = () => {
-      playingRef.current = true;
-      setStatus("playing");
-      startLoop();
-    };
-    const onPause = () => {
-      // distinguish pause vs end via ended flag in handlers
+      paint(indexForTime(timingsRef.current, audio.currentTime));
     };
     const onEnded = () => {
       playingRef.current = false;
-      clearRaf();
-      setStatus("ready");
-      setActiveIdx(-1);
+      clearTimer();
+      setPlayStatus("ready");
+      paint(-1);
     };
 
     audio.addEventListener("timeupdate", onTime);
-    audio.addEventListener("play", onPlay);
-    audio.addEventListener("pause", onPause);
     audio.addEventListener("ended", onEnded);
     return () => {
       audio.removeEventListener("timeupdate", onTime);
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("pause", onPause);
       audio.removeEventListener("ended", onEnded);
     };
-  }, [updateHighlight, startLoop]);
+  }, [paint]);
 
   async function ensureReady() {
     if (preparedRef.current) return preparedRef.current;
 
-    setStatus("loading");
+    setPlayStatus("loading");
     setErrorMsg("");
+    setFallbackNote("");
 
     const result = await prepareNarration(storyText, {
       voiceId: reader?.id,
       voiceName: reader?.name,
+      seed: bookNumber * 17 + (reader?.id?.length || 0),
     });
 
-    let words = result.words || [];
-    // Guarantee 1:1 with display words
-    words = alignTimingsToDisplay(displayWords, words, 0);
+    const words = alignTimingsToDisplay(
+      displayWords,
+      result.words || [],
+      0
+    );
     timingsRef.current = words;
 
     const prepared = {
@@ -176,11 +188,21 @@ export default function KaraokeStory({ text, reader }) {
       audioUrl: result.audioUrl || null,
       words,
       voiceName: result.voiceName || reader?.name || "Storyteller",
+      voiceId: result.voiceId || reader?.id,
+      fallbackReason: result.fallbackReason || "",
+      seed: result.seed ?? bookNumber,
     };
     preparedRef.current = prepared;
     setProvider(result.provider);
     setVoiceLabel(prepared.voiceName);
-    setStatus("ready");
+
+    if (result.provider === "browser" && result.fallbackReason) {
+      setFallbackNote(
+        "ElevenLabs quota low — using a distinct system voice for this book"
+      );
+    }
+
+    setPlayStatus("ready");
     return prepared;
   }
 
@@ -188,103 +210,100 @@ export default function KaraokeStory({ text, reader }) {
     try {
       const prepared = await ensureReady();
 
-      // Don't call stopAll() in a way that clears timings — only stop playback
-      clearRaf();
+      // Stop prior playback without wiping timings
+      clearTimer();
       playingRef.current = false;
       if (browserRef.current) {
         browserRef.current.stop();
         browserRef.current = null;
       }
+      const audio = audioRef.current;
+      if (audio) {
+        audio.pause();
+      }
 
+      // ─── ElevenLabs path ───
       if (prepared.provider === "elevenlabs" && prepared.audioUrl) {
-        const audio = audioRef.current;
         if (!audio) throw new Error("Audio element missing");
 
-        // Reset and load
-        audio.pause();
         audio.src = prepared.audioUrl;
         audio.load();
 
-        await new Promise((resolve, reject) => {
-          const ok = () => {
-            cleanup();
+        await new Promise((resolve) => {
+          const done = () => {
+            audio.removeEventListener("canplaythrough", done);
+            audio.removeEventListener("loadeddata", done);
             resolve();
           };
-          const bad = () => {
-            cleanup();
-            reject(new Error("Audio failed to load"));
-          };
-          const cleanup = () => {
-            audio.removeEventListener("canplay", ok);
-            audio.removeEventListener("error", bad);
-          };
-          audio.addEventListener("canplay", ok, { once: true });
-          audio.addEventListener("error", bad, { once: true });
-          setTimeout(ok, 1200);
+          audio.addEventListener("canplaythrough", done, { once: true });
+          audio.addEventListener("loadeddata", done, { once: true });
+          setTimeout(done, 1500);
         });
 
-        // Refine timings with real duration once known
-        if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
-          const refined = alignTimingsToDisplay(
-            displayWords,
-            prepared.words,
-            audio.duration
-          );
-          // If API timings look valid (span most of duration), keep them;
-          // otherwise redistribute using duration.
-          const lastEnd = prepared.words[prepared.words.length - 1]?.end || 0;
-          if (lastEnd < audio.duration * 0.5 || prepared.words.length !== displayWords.length) {
-            // Scale API times to duration if we have them
-            if (prepared.words.length && lastEnd > 0) {
-              const scale = audio.duration / lastEnd;
-              timingsRef.current = prepared.words.map((w, i) => ({
-                word: displayWords[i] || w.word,
-                start: w.start * scale,
-                end: w.end * scale,
-              }));
-              // pad/trim
-              if (timingsRef.current.length !== displayWords.length) {
-                timingsRef.current = refined;
-              }
-            } else {
-              timingsRef.current = refined;
-            }
-          } else {
+        // Fit timings to real duration
+        if (audio.duration && isFinite(audio.duration) && audio.duration > 0.2) {
+          const lastEnd =
+            prepared.words[prepared.words.length - 1]?.end || 0;
+          if (lastEnd > 0.05) {
+            const scale = audio.duration / lastEnd;
             timingsRef.current = prepared.words.map((w, i) => ({
               word: displayWords[i] || w.word,
-              start: w.start,
-              end: w.end,
+              start: w.start * scale,
+              end: w.end * scale,
             }));
+          } else {
+            timingsRef.current = alignTimingsToDisplay(
+              displayWords,
+              prepared.words,
+              audio.duration
+            );
           }
         }
 
-        setStatus("playing");
+        setPlayStatus("playing");
         playingRef.current = true;
+        // Force first word on immediately
+        paint(0);
+        startHighlightLoop();
         await audio.play();
-        startLoop();
         return;
       }
 
-      // Browser fallback
-      const browser = createBrowserNarration(storyText);
+      // ─── Browser multi-voice path ───
+      const browser = createBrowserNarration(storyText, {
+        seed: prepared.seed ?? bookNumber,
+        rate: 0.9,
+      });
       browserRef.current = browser;
       timingsRef.current = alignTimingsToDisplay(
         displayWords,
         browser.words,
         0
       );
+      setVoiceLabel(
+        reader?.name
+          ? `${reader.name} · ${browser.voiceName}`
+          : browser.voiceName
+      );
+
+      browser.onWord((idx) => {
+        if (playingRef.current) paint(idx);
+      });
       browser.onEnd(() => {
         playingRef.current = false;
-        clearRaf();
-        setStatus("ready");
-        setActiveIdx(-1);
+        clearTimer();
+        setPlayStatus("ready");
+        paint(-1);
       });
-      setStatus("playing");
+
+      setPlayStatus("playing");
+      playingRef.current = true;
+      paint(0);
       browser.play();
-      startLoop();
+      startHighlightLoop();
     } catch (err) {
       playingRef.current = false;
-      setStatus("error");
+      setPlayStatus("error");
       setErrorMsg(err?.message || "Could not prepare audio");
     }
   }
@@ -294,38 +313,38 @@ export default function KaraokeStory({ text, reader }) {
     if (audio && !audio.paused) {
       audio.pause();
       playingRef.current = false;
-      clearRaf();
-      setStatus("paused");
+      clearTimer();
+      setPlayStatus("paused");
       return;
     }
     if (browserRef.current) {
       browserRef.current.pause();
       playingRef.current = false;
-      clearRaf();
-      setStatus("paused");
+      clearTimer();
+      setPlayStatus("paused");
     }
   }
 
   async function handleResume() {
     const audio = audioRef.current;
-    if (audio?.src && status === "paused") {
-      setStatus("playing");
+    if (audio?.src && statusRef.current === "paused") {
+      setPlayStatus("playing");
       playingRef.current = true;
+      startHighlightLoop();
       await audio.play();
-      startLoop();
       return;
     }
-    if (browserRef.current && status === "paused") {
+    if (browserRef.current && statusRef.current === "paused") {
       browserRef.current.resume();
-      setStatus("playing");
+      setPlayStatus("playing");
       playingRef.current = true;
-      startLoop();
+      startHighlightLoop();
     }
   }
 
   function handleStop() {
-    stopAll();
-    setStatus(preparedRef.current ? "ready" : "idle");
+    stopPlayback();
+    setPlayStatus(preparedRef.current ? "ready" : "idle");
   }
 
   return (
@@ -359,27 +378,35 @@ export default function KaraokeStory({ text, reader }) {
           )}
         </div>
         <p className="listen-meta">
-          {status === "loading" && `Summoning ${voiceLabel}…`}
-          {status === "playing" &&
-            `Read by ${voiceLabel} · follow the glowing words`}
+          {status === "loading" && `Summoning ${reader?.name || "reader"}…`}
+          {status === "playing" && (
+            <>
+              <span className="listen-live">●</span> {voiceLabel}
+              {provider === "elevenlabs" ? " · karaoke on" : " · karaoke on"}
+            </>
+          )}
           {status === "paused" && "Paused"}
           {status === "ready" &&
             (provider === "elevenlabs"
-              ? `Ready · ${voiceLabel}`
-              : `Ready · ${voiceLabel} (browser)`)}
-          {status === "idle" &&
-            `Tap Listen · read by ${voiceLabel}`}
+              ? `Ready · ${voiceLabel} (ElevenLabs)`
+              : `Ready · ${voiceLabel}`)}
+          {status === "idle" && `Tap Listen · ${reader?.name || "Storyteller"}`}
           {status === "error" && (errorMsg || "Audio unavailable")}
         </p>
       </div>
 
-      <p className="insight-story karaoke-text" aria-live="off">
+      {fallbackNote && status !== "error" && (
+        <p className="listen-fallback">{fallbackNote}</p>
+      )}
+
+      <p
+        className={`insight-story karaoke-text${status === "playing" || status === "paused" ? " is-reading" : ""}`}
+        aria-live="off"
+      >
         {displayWords.map((word, i) => {
-          const isActive = i === activeIdx && (status === "playing" || status === "paused");
-          const isPast =
-            activeIdx >= 0 &&
-            i < activeIdx &&
-            (status === "playing" || status === "paused");
+          const reading = status === "playing" || status === "paused";
+          const isActive = reading && i === activeIdx;
+          const isPast = reading && activeIdx >= 0 && i < activeIdx;
           return (
             <span
               key={`${i}-${word}`}
@@ -388,7 +415,6 @@ export default function KaraokeStory({ text, reader }) {
                 (isActive ? " is-active" : "") +
                 (isPast ? " is-past" : "")
               }
-              data-i={i}
             >
               {word}
               {i < displayWords.length - 1 ? " " : ""}

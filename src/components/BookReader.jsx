@@ -110,7 +110,11 @@ export default function BookReader({ book, page, onPageChange, onClose }) {
                 <figcaption>墨 · sumi · life & beauty</figcaption>
               </figure>
 
-              <KaraokeStory text={insight.story} reader={reader} />
+              <KaraokeStory
+                text={insight.story}
+                reader={reader}
+                bookNumber={book.number}
+              />
             </article>
           )}
         </div>

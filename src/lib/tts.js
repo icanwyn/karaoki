@@ -1,6 +1,6 @@
 /**
  * ElevenLabs TTS + karaoke word timings.
- * Falls back to browser speech if the API is unavailable.
+ * Falls back to multi-voice browser speech when the API is unavailable.
  */
 
 const cache = new Map();
@@ -12,15 +12,14 @@ export function tokenizeWords(text) {
     .filter(Boolean);
 }
 
-export function estimateWordTimings(text, wordsPerMinute = 135) {
+export function estimateWordTimings(text, wordsPerMinute = 130) {
   const words = tokenizeWords(text);
   const secPerWord = 60 / wordsPerMinute;
-  let t = 0.12;
+  let t = 0.05;
   return words.map((word) => {
     const letters = word.replace(/\W/g, "").length || 1;
-    const lenFactor = Math.min(1.75, Math.max(0.5, letters / 4.5));
-    // Story pacing: slightly longer pauses after punctuation
-    const punctBoost = /[,;:]$/.test(word) ? 0.08 : /[.!?]"?$/.test(word) ? 0.18 : 0.03;
+    const lenFactor = Math.min(1.8, Math.max(0.55, letters / 4.2));
+    const punctBoost = /[,;:]$/.test(word) ? 0.1 : /[.!?]"?$/.test(word) ? 0.22 : 0.04;
     const dur = secPerWord * lenFactor;
     const start = t;
     const end = t + dur;
@@ -30,7 +29,7 @@ export function estimateWordTimings(text, wordsPerMinute = 135) {
 }
 
 /**
- * Align API timing words to the exact display word list so karaoke indices match 1:1.
+ * Align API timing words 1:1 with on-screen words.
  */
 export function alignTimingsToDisplay(displayWords, timedWords, audioDurationSec) {
   if (!displayWords.length) return [];
@@ -43,29 +42,22 @@ export function alignTimingsToDisplay(displayWords, timedWords, audioDurationSec
     }))
     .filter((w) => Number.isFinite(w.start));
 
-  // Perfect or near-perfect match: zip by index
-  if (timed.length && Math.abs(timed.length - displayWords.length) <= 2) {
+  if (timed.length && Math.abs(timed.length - displayWords.length) <= 3) {
     const out = displayWords.map((word, i) => {
       const src = timed[Math.min(i, timed.length - 1)];
       return {
         word,
         start: src.start,
-        end: Math.max(src.end, src.start + 0.05),
+        end: Math.max(src.end, src.start + 0.06),
       };
     });
-    // Ensure strictly non-decreasing starts (fixes occasional API jitter)
     for (let i = 1; i < out.length; i++) {
-      if (out[i].start < out[i - 1].start) {
-        out[i].start = out[i - 1].end;
-      }
-      if (out[i].end <= out[i].start) {
-        out[i].end = out[i].start + 0.08;
-      }
+      if (out[i].start < out[i - 1].start) out[i].start = out[i - 1].end;
+      if (out[i].end <= out[i].start) out[i].end = out[i].start + 0.08;
     }
     return out;
   }
 
-  // Different lengths: stretch API timeline across display words by character weight
   if (timed.length > 1) {
     const t0 = timed[0].start;
     const t1 = timed[timed.length - 1].end || timed[timed.length - 1].start;
@@ -82,13 +74,12 @@ export function alignTimingsToDisplay(displayWords, timedWords, audioDurationSec
     });
   }
 
-  // Estimate from audio duration if known
   if (audioDurationSec > 0) {
     const totalChars = displayWords.reduce((n, w) => n + Math.max(1, w.length), 0);
-    let t = 0.05;
+    let t = 0.02;
     return displayWords.map((word) => {
       const share = Math.max(1, word.length) / totalChars;
-      const dur = Math.max(0.08, audioDurationSec * share);
+      const dur = Math.max(0.07, audioDurationSec * share);
       const start = t;
       const end = Math.min(audioDurationSec, t + dur);
       t = end;
@@ -97,6 +88,26 @@ export function alignTimingsToDisplay(displayWords, timedWords, audioDurationSec
   }
 
   return estimateWordTimings(displayWords.join(" "));
+}
+
+/** Map character offset in full text → word index */
+export function charIndexToWordIndex(text, charIndex) {
+  const words = tokenizeWords(text);
+  if (!words.length) return -1;
+  if (charIndex <= 0) return 0;
+
+  let cursor = 0;
+  const normalized = text.trim();
+  // Walk original trimmed text
+  for (let i = 0; i < words.length; i++) {
+    const idx = normalized.indexOf(words[i], cursor);
+    if (idx < 0) continue;
+    const start = idx;
+    const end = idx + words[i].length;
+    if (charIndex < end) return i;
+    cursor = end;
+  }
+  return words.length - 1;
 }
 
 function cacheKey(text, voiceId) {
@@ -113,15 +124,19 @@ export async function fetchElevenLabsNarration(text, { voiceId, voiceName } = {}
     body: JSON.stringify({
       text,
       voiceId,
-      // Storytelling style hint for the server
       style: "story",
     }),
   });
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.message || data.error || "TTS request failed");
+    const msg =
+      typeof data.message === "string"
+        ? data.message
+        : data.error || "TTS request failed";
+    const err = new Error(msg);
     err.code = data.error || res.status;
+    err.raw = data;
     throw err;
   }
 
@@ -135,86 +150,137 @@ export async function fetchElevenLabsNarration(text, { voiceId, voiceName } = {}
     words,
     rawWords,
     voiceId: data.voiceId || voiceId,
-    voiceName: data.voiceName || voiceName || "Storyteller",
+    voiceName: voiceName || "Storyteller",
   };
   cache.set(key, result);
   return result;
 }
 
-export function createBrowserNarration(text) {
+/**
+ * Pick a distinct browser voice for each book so fallback isn't always identical.
+ */
+export function pickBrowserVoice(seed = 0) {
+  if (typeof window === "undefined" || !window.speechSynthesis) return null;
+  const all = window.speechSynthesis.getVoices() || [];
+  const english = all.filter((v) => /^en([-_]|$)/i.test(v.lang || ""));
+  const pool = english.length ? english : all;
+  if (!pool.length) return null;
+  const idx = Math.abs(Number(seed) || 0) % pool.length;
+  return pool[idx];
+}
+
+/**
+ * Browser narration with:
+ * - estimated word timings (always)
+ * - SpeechSynthesis boundary events when available (best karaoke)
+ * - wall-clock time that starts immediately on play() (not waiting for onstart)
+ */
+export function createBrowserNarration(text, { seed = 0, rate = 0.92 } = {}) {
   const words = estimateWordTimings(text);
   const utter = new SpeechSynthesisUtterance(text);
-  utter.rate = 0.9;
-  utter.pitch = 1;
+  // Distinct pacing per book even if OS has few voices
+  const s = Math.abs(Number(seed) || 0);
+  utter.rate = Math.min(1.05, Math.max(0.82, rate + ((s % 7) - 3) * 0.025));
+  utter.pitch = Math.min(1.2, Math.max(0.85, 1 + ((s % 9) - 4) * 0.04));
   utter.lang = "en-US";
 
-  const voices = window.speechSynthesis?.getVoices?.() || [];
-  const preferred =
-    voices.find((v) => /Samantha|Google US English|Karen|Moira|Female/i.test(v.name)) ||
-    voices.find((v) => v.lang?.startsWith("en")) ||
-    null;
-  if (preferred) utter.voice = preferred;
+  const voice = pickBrowserVoice(seed);
+  if (voice) {
+    utter.voice = voice;
+    utter.lang = voice.lang || "en-US";
+  }
 
   let startWall = 0;
   let pausedAt = 0;
   let playing = false;
   let ended = false;
   let onEndCb = null;
+  let onWordCb = null; // (wordIndex) => void
 
   utter.onstart = () => {
-    startWall = performance.now() - pausedAt * 1000;
+    // Re-anchor to speech engine start if it fires
+    if (!playing) startWall = performance.now() - pausedAt * 1000;
     playing = true;
     ended = false;
   };
+
   utter.onend = () => {
     playing = false;
     ended = true;
     onEndCb?.();
   };
+
   utter.onerror = () => {
     playing = false;
     ended = true;
     onEndCb?.();
   };
 
+  utter.onboundary = (ev) => {
+    if (ev.name === "word" || ev.name === "Word") {
+      const idx = charIndexToWordIndex(text, ev.charIndex ?? 0);
+      onWordCb?.(idx);
+    }
+  };
+
   return {
     provider: "browser",
     words,
+    voiceName: voice?.name || "System voice",
     play() {
-      if (ended) {
-        pausedAt = 0;
-        ended = false;
+      ended = false;
+      pausedAt = 0;
+      // Start clock immediately so karaoke works even before onstart
+      startWall = performance.now();
+      playing = true;
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        /* ignore */
       }
-      window.speechSynthesis.cancel();
       window.speechSynthesis.speak(utter);
     },
     pause() {
-      if (playing) {
-        pausedAt = (performance.now() - startWall) / 1000;
+      if (!playing) return;
+      pausedAt = (performance.now() - startWall) / 1000;
+      playing = false;
+      try {
         window.speechSynthesis.pause();
-        playing = false;
+      } catch {
+        /* ignore */
       }
     },
     resume() {
-      window.speechSynthesis.resume();
-      playing = true;
       startWall = performance.now() - pausedAt * 1000;
+      playing = true;
+      try {
+        window.speechSynthesis.resume();
+      } catch {
+        /* ignore */
+      }
     },
     stop() {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        /* ignore */
+      }
       playing = false;
       pausedAt = 0;
       ended = true;
     },
     getCurrentTime() {
       if (ended) return words[words.length - 1]?.end || 0;
-      if (!playing && pausedAt) return pausedAt;
-      if (!playing) return 0;
+      if (!playing) return pausedAt || 0;
       return Math.max(0, (performance.now() - startWall) / 1000);
     },
-    isPlaying: () => playing,
+    isPlaying: () => playing && !ended,
+    hasEnded: () => ended,
     onEnd(cb) {
       onEndCb = cb;
+    },
+    onWord(cb) {
+      onWordCb = cb;
     },
   };
 }
@@ -223,12 +289,26 @@ export async function prepareNarration(text, options = {}) {
   try {
     return await fetchElevenLabsNarration(text, options);
   } catch (err) {
+    // Browser multi-voice fallback — still story-like karaoke
+    const seed = options.seed ?? 0;
+    const voice = pickBrowserVoice(seed);
     return {
       provider: "browser",
       audioUrl: null,
       words: estimateWordTimings(text),
-      voiceName: "Browser",
+      voiceId: options.voiceId,
+      voiceName: options.voiceName || voice?.name || "System",
       fallbackReason: err.message,
+      seed,
     };
   }
+}
+
+/** Preload voices (Chrome loads async) */
+export function warmSpeechVoices() {
+  if (typeof window === "undefined" || !window.speechSynthesis) return;
+  window.speechSynthesis.getVoices();
+  window.speechSynthesis.onvoiceschanged = () => {
+    window.speechSynthesis.getVoices();
+  };
 }

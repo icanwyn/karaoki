@@ -418,10 +418,14 @@ export default function App() {
       setLyrics(lyricsText);
       setTimedWords(words);
       setOffsetMs(0);
+      const shiftNote =
+        result.appliedShiftSec && Math.abs(result.appliedShiftSec) >= 0.15
+          ? ` Onset-aligned by ${(result.appliedShiftSec >= 0 ? "+" : "") + result.appliedShiftSec.toFixed(2)}s.`
+          : "";
       setExportMessage(
         `Auto-synced ${words.length} words via ${
           result.provider === "openai" ? "server Whisper" : "on-device Whisper"
-        }. Play to review, then tweak with offset or Tap Sync.`
+        }.${shiftNote} If all words are early/late together, use Global offset. If spacing is wrong, use Tap Sync.`
       );
       setExportError("");
       setStatus("play");

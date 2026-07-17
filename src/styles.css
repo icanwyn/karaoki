@@ -816,6 +816,16 @@ button:disabled {
   box-shadow: 0 0 24px rgba(45, 226, 230, 0.12);
 }
 
+.offset-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(45, 226, 230, 0.05);
+  border: 1px solid rgba(45, 226, 230, 0.15);
+}
+
 .offset-row {
   display: flex;
   flex-direction: column;
@@ -825,14 +835,44 @@ button:disabled {
 .offset-row label {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
   font-size: 0.78rem;
   color: var(--text-dim);
   font-weight: 600;
 }
 
+.offset-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--cyan);
+}
+
+.offset-sec {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
 .offset-row input[type="range"] {
   width: 100%;
   accent-color: var(--cyan);
+}
+
+.offset-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.offset-nudge {
+  flex-wrap: wrap;
+}
+
+.offset-help {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
 }
 
 .word-preview {

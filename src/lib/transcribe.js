@@ -4,6 +4,13 @@
  * in-browser Whisper via @huggingface/transformers (no API key).
  */
 
+import {
+  alignWordsToOnset,
+  clampWordsToDuration,
+  decodeMono16k,
+  findEnergyOnset,
+} from "./audioAlign.js";
+
 const FAR = 1e9;
 
 /**
@@ -13,6 +20,7 @@ const FAR = 1e9;
  *   words: TimedWord[],
  *   provider: 'openai' | 'browser',
  *   fullText: string,
+ *   appliedShiftSec?: number,
  * }} TranscribeResult
  */
 
@@ -29,17 +37,28 @@ export async function transcribeSong(audioFile, opts = {}) {
   const { onProgress, signal, preferBrowser = false } = opts;
   if (!audioFile) throw new Error("No audio file to transcribe");
 
+  // Always decode once so we can onset-align server or browser results
+  onProgress?.({ phase: "decode", progress: 0.05, status: "Decoding audio…" });
+  let decoded = null;
+  try {
+    decoded = await decodeMono16k(audioFile);
+  } catch {
+    decoded = null;
+  }
+  throwIfAborted(signal);
+
   if (!preferBrowser) {
     try {
-      onProgress?.({ phase: "server", progress: 0.05, status: "Trying server transcription…" });
+      onProgress?.({ phase: "server", progress: 0.08, status: "Trying server transcription…" });
       const server = await transcribeViaServer(audioFile, { onProgress, signal });
-      if (server?.words?.length) return server;
+      if (server?.words?.length) {
+        return postAlign(server, decoded, onProgress);
+      }
     } catch (err) {
       if (signal?.aborted) throw err;
-      // Fall through to browser model when server is missing/unavailable
       onProgress?.({
         phase: "fallback",
-        progress: 0.1,
+        progress: 0.12,
         status: err?.message?.includes("not configured")
           ? "No server key — using on-device Whisper…"
           : `Server unavailable (${shortErr(err)}) — using on-device Whisper…`,
@@ -47,7 +66,34 @@ export async function transcribeSong(audioFile, opts = {}) {
     }
   }
 
-  return transcribeInBrowser(audioFile, { onProgress, signal });
+  const browser = await transcribeInBrowser(audioFile, decoded, { onProgress, signal });
+  return postAlign(browser, decoded, onProgress);
+}
+
+/**
+ * @param {TranscribeResult} result
+ * @param {{ samples: Float32Array, sampleRate: number, duration: number } | null} decoded
+ * @param {Function} [onProgress]
+ */
+function postAlign(result, decoded, onProgress) {
+  let words = normalizeWords(result.words || []);
+  let appliedShiftSec = 0;
+
+  if (decoded?.samples?.length) {
+    onProgress?.({ phase: "align", progress: 0.95, status: "Aligning lyrics to audio onset…" });
+    const onset = findEnergyOnset(decoded.samples, decoded.sampleRate);
+    const aligned = alignWordsToOnset(words, onset);
+    words = aligned.words;
+    appliedShiftSec = aligned.appliedShiftSec;
+    words = clampWordsToDuration(words, decoded.duration);
+  }
+
+  return {
+    ...result,
+    words,
+    lyrics: result.lyrics || wordsToLyrics(words),
+    appliedShiftSec,
+  };
 }
 
 /**
@@ -76,7 +122,7 @@ async function transcribeViaServer(audioFile, { onProgress, signal } = {}) {
     throw new Error(msg);
   }
 
-  onProgress?.({ phase: "server", progress: 1, status: "Done" });
+  onProgress?.({ phase: "server", progress: 0.9, status: "Server done" });
   const words = normalizeWords(data.words || []);
   if (!words.length) throw new Error("Server returned no words");
 
@@ -91,14 +137,14 @@ async function transcribeViaServer(audioFile, { onProgress, signal } = {}) {
 /**
  * In-browser Whisper (Xenova). First run downloads the model (~150MB for base.en).
  * @param {File|Blob} audioFile
+ * @param {{ samples: Float32Array, sampleRate: number, duration: number } | null} decoded
  * @param {{ onProgress?: Function, signal?: AbortSignal }} opts
  */
-async function transcribeInBrowser(audioFile, { onProgress, signal } = {}) {
+async function transcribeInBrowser(audioFile, decoded, { onProgress, signal } = {}) {
   throwIfAborted(signal);
-  onProgress?.({ phase: "model", progress: 0.12, status: "Loading Whisper model…" });
+  onProgress?.({ phase: "model", progress: 0.15, status: "Loading Whisper model…" });
 
   const { pipeline, env } = await import("@huggingface/transformers");
-  // Cache models in the browser; allow remote downloads from HF
   env.allowLocalModels = false;
   env.useBrowserCache = true;
 
@@ -108,13 +154,12 @@ async function transcribeInBrowser(audioFile, { onProgress, signal } = {}) {
     "automatic-speech-recognition",
     "Xenova/whisper-base.en",
     {
-      // quantized = faster download / inference
       dtype: "q8",
       progress_callback: (p) => {
         if (!p) return;
         const frac =
           typeof p.progress === "number"
-            ? Math.min(0.55, 0.12 + (p.progress / 100) * 0.4)
+            ? Math.min(0.55, 0.15 + (p.progress / 100) * 0.35)
             : 0.2;
         onProgress?.({
           phase: "model",
@@ -127,42 +172,40 @@ async function transcribeInBrowser(audioFile, { onProgress, signal } = {}) {
   );
 
   throwIfAborted(signal);
-  onProgress?.({ phase: "decode", progress: 0.58, status: "Decoding audio…" });
+  onProgress?.({ phase: "transcribe", progress: 0.6, status: "Transcribing & aligning words…" });
 
-  const url = URL.createObjectURL(audioFile);
+  // Prefer raw 16 kHz mono — more reliable timestamps than a compressed blob URL
+  const input = decoded?.samples?.length
+    ? { raw: decoded.samples, sampling_rate: decoded.sampleRate }
+    : URL.createObjectURL(audioFile);
+
+  const revoke =
+    typeof input === "string"
+      ? () => URL.revokeObjectURL(input)
+      : () => {};
+
   try {
-    onProgress?.({ phase: "transcribe", progress: 0.62, status: "Transcribing & aligning words…" });
-
-    const result = await transcriber(url, {
+    const result = await transcriber(input, {
       return_timestamps: "word",
-      chunk_length_s: 30,
-      stride_length_s: 5,
-      // English-optimized model; still fine for many English karaoke tracks
+      chunk_length_s: 20,
+      stride_length_s: 3,
       language: "english",
       task: "transcribe",
     });
 
     throwIfAborted(signal);
 
-    const words = chunksToWords(result);
+    let words = chunksToWords(result);
     if (!words.length) {
-      // Some builds return only segment timestamps — split segments into words
-      const fallback = segmentsToWords(result);
-      if (!fallback.length) {
-        throw new Error(
-          "Could not extract words from this track. Try a clearer vocal recording or paste lyrics manually."
-        );
-      }
-      onProgress?.({ phase: "done", progress: 1, status: "Done" });
-      return {
-        lyrics: wordsToLyrics(fallback),
-        words: fallback,
-        provider: "browser",
-        fullText: (result?.text || fallback.map((w) => w.text).join(" ")).trim(),
-      };
+      words = segmentsToWords(result);
+    }
+    if (!words.length) {
+      throw new Error(
+        "Could not extract words from this track. Try a clearer vocal recording or paste lyrics manually."
+      );
     }
 
-    onProgress?.({ phase: "done", progress: 1, status: "Done" });
+    onProgress?.({ phase: "transcribe", progress: 0.9, status: "Transcription complete" });
     return {
       lyrics: wordsToLyrics(words),
       words,
@@ -170,7 +213,7 @@ async function transcribeInBrowser(audioFile, { onProgress, signal } = {}) {
       fullText: (result?.text || words.map((w) => w.text).join(" ")).trim(),
     };
   } finally {
-    URL.revokeObjectURL(url);
+    revoke();
   }
 }
 
@@ -184,7 +227,6 @@ function chunksToWords(result) {
     const raw = String(c.text || "").trim();
     if (!raw) continue;
     const [s, e] = Array.isArray(c.timestamp) ? c.timestamp : [null, null];
-    // Word-level: one chunk ≈ one word. Segment-level: may be a phrase.
     const tokens = raw.split(/\s+/).filter(Boolean);
     const start = Number.isFinite(s) ? s : words.length ? words[words.length - 1].end : 0;
     const end = Number.isFinite(e) ? e : start + Math.max(0.2, tokens.length * 0.25);
@@ -195,14 +237,20 @@ function chunksToWords(result) {
         end: Math.max(start + 0.05, end),
       });
     } else {
+      // Phrase-level timestamp: distribute words by relative character length
+      const weights = tokens.map((t) => Math.max(1, t.length));
+      const totalW = weights.reduce((a, b) => a + b, 0);
       const span = Math.max(0.08, end - start);
-      const step = span / tokens.length;
+      let cursor = start;
       tokens.forEach((tok, i) => {
+        const wSpan = (weights[i] / totalW) * span;
+        const wEnd = i === tokens.length - 1 ? end : cursor + wSpan;
         words.push({
           text: cleanToken(tok),
-          start: start + i * step,
-          end: start + (i + 1) * step,
+          start: cursor,
+          end: Math.max(cursor + 0.05, wEnd),
         });
+        cursor = wEnd;
       });
     }
   }
@@ -210,13 +258,9 @@ function chunksToWords(result) {
 }
 
 function segmentsToWords(result) {
-  // result.chunks with phrase timestamps, or only result.text
   if (Array.isArray(result?.chunks) && result.chunks.length) {
     return chunksToWords(result);
   }
-  const text = String(result?.text || "").trim();
-  if (!text) return [];
-  // No timing — return empty so caller can estimate against duration later
   return [];
 }
 

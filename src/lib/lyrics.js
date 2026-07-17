@@ -192,21 +192,31 @@ export function estimateTimings(wordsOrText, durationSec) {
   });
 }
 
+/** Starts at or above this are treated as "not yet timed" (manual sync sentinels). */
+const UNTAPPED_THRESHOLD = 1e8;
+
 /**
  * Active word index for time t. Returns -1 if none.
+ * Ignores untapped sentinel timings so the stage never races through future words.
  * @param {{ start: number, end: number }[]} words
  * @param {number} t
  * @returns {number}
  */
 export function indexForTime(words, t) {
   if (!words?.length || t == null || Number.isNaN(t)) return -1;
-  // Binary search by start
+  // Binary search by start among timed words only
   let lo = 0;
   let hi = words.length - 1;
   let ans = -1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (words[mid].start <= t) {
+    const s = words[mid].start;
+    if (s >= UNTAPPED_THRESHOLD) {
+      // Untapped region — search left for last real timing
+      hi = mid - 1;
+      continue;
+    }
+    if (s <= t) {
       ans = mid;
       lo = mid + 1;
     } else {
@@ -214,10 +224,13 @@ export function indexForTime(words, t) {
     }
   }
   if (ans < 0) return -1;
-  // Prefer current window; if past end of last matched, stay on last briefly
+  if (words[ans].start >= UNTAPPED_THRESHOLD) return -1;
+  // Prefer current window; if past end of last matched, stay on last until next real start
   if (t < words[ans].end + 0.02) return ans;
-  // If between words, still show last sung word until next starts
-  if (ans + 1 < words.length && t < words[ans + 1].start) return ans;
+  if (ans + 1 < words.length) {
+    const nextStart = words[ans + 1].start;
+    if (nextStart >= UNTAPPED_THRESHOLD || t < nextStart) return ans;
+  }
   if (ans === words.length - 1) return ans;
   return ans;
 }

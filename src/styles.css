@@ -496,6 +496,32 @@ button:disabled {
     inset 0 0 80px rgba(168, 85, 247, 0.08);
 }
 
+.video-stage.is-syncing {
+  box-shadow:
+    0 0 0 1px rgba(45, 226, 230, 0.35),
+    0 20px 60px rgba(0, 0, 0, 0.5),
+    inset 0 0 80px rgba(45, 226, 230, 0.08);
+}
+
+.sync-badge {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #041016;
+  background: linear-gradient(90deg, var(--cyan), #7cf5f8);
+  box-shadow: 0 0 24px rgba(45, 226, 230, 0.45);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
 .stage-bg {
   position: absolute;
   inset: 0;
@@ -589,6 +615,53 @@ button:disabled {
 .kw.past {
   color: rgba(255, 255, 255, 0.78);
   text-shadow: 0 0 10px rgba(255, 255, 255, 0.22);
+}
+
+/* Next word waiting for a tap (sync mode) — stable cyan pulse, does not race */
+.kw.next {
+  color: var(--cyan);
+  text-shadow:
+    0 0 12px rgba(45, 226, 230, 0.95),
+    0 0 28px rgba(45, 226, 230, 0.55);
+  transform: scale(1.06);
+  animation: next-pulse 1s ease-in-out infinite;
+}
+
+@keyframes next-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
+.auto-lyrics-btn {
+  margin-bottom: 10px;
+  height: 42px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.auto-progress {
+  margin: 0 0 12px;
+}
+
+.auto-progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.auto-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--magenta), var(--cyan));
+  box-shadow: 0 0 12px rgba(45, 226, 230, 0.45);
+  transition: width 0.25s ease;
 }
 
 .kw.active {

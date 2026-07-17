@@ -11,6 +11,7 @@ export default function SyncToolbar({
   onTap,
   hasAudio,
   hasWords,
+  disabled = false,
 }) {
   return (
     <div className={`sync-toolbar ${isSyncing ? "is-active" : ""}`}>
@@ -24,8 +25,8 @@ export default function SyncToolbar({
       </div>
 
       <p className="hint" style={{ margin: 0 }}>
-        Start sync, play the track, then press <kbd>Space</kbd> (or Tap) on each word as you hear
-        it. Press <kbd>Esc</kbd> to stop.
+        Refine auto timings: press <kbd>Space</kbd> (or Tap) on each word as you hear it. The stage
+        stays locked to the current line — no racing words. <kbd>Esc</kbd> stops.
       </p>
 
       <div className="btn-row">
@@ -34,7 +35,7 @@ export default function SyncToolbar({
             type="button"
             className="btn btn-sm btn-primary"
             onClick={onStartSync}
-            disabled={!hasAudio || !hasWords}
+            disabled={!hasAudio || !hasWords || disabled}
           >
             Start sync
           </button>
@@ -52,7 +53,7 @@ export default function SyncToolbar({
           type="button"
           className="btn btn-sm btn-ghost"
           onClick={onResetTimings}
-          disabled={!hasWords}
+          disabled={!hasWords || disabled || isSyncing}
         >
           Reset timings
         </button>
@@ -76,6 +77,7 @@ export default function SyncToolbar({
           step={10}
           value={offsetMs}
           onChange={(e) => onOffsetChange?.(Number(e.target.value))}
+          disabled={isSyncing}
         />
       </div>
     </div>

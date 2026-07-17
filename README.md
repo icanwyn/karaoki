@@ -20,17 +20,25 @@ npm run preview
 
 1. **Upload audio** — MP3, WAV, M4A, or OGG in the Media panel.
 2. **Pick a backdrop** — upload an image or choose a stock neon gradient.
-3. **Paste lyrics** — plain text (one phrase per line) or LRC with `[mm:ss.xx]` tags.
-4. **Time the words**
-   - **Parse LRC** if you pasted timed lyrics.
-   - **Auto-time** to spread words evenly across the song duration.
-   - **Tap Sync** — Start sync, then press `Space` (or **Tap word**) on each word as you hear it. `Esc` stops sync.
-5. **Offset** — nudge all timings with the global offset slider.
-6. **Play** — words light up (hot pink / cyan glow) in the lyric bar on the bottom 20% of the stage.
-7. **Export** — records stage + audio to a downloadable **WebM** (VP8/VP9 + Opus when supported).
-8. **Share** — copy a project link with title, lyrics, timings, and stock backdrop id. Recipients re-upload audio/image (media is not embedded in the URL).
+3. **Get lyrics + auto-sync**
+   - **✦ Auto lyrics from song** — transcribes vocals and stamps each word to the audio.
+     - With `OPENAI_API_KEY` set (Vercel env or `.env.local`), uses server Whisper.
+     - Without a key, uses **on-device Whisper** in the browser (first run downloads the model).
+   - Or **paste lyrics** / LRC, then **Parse LRC** or **Auto-time**.
+4. **Refine timings** (optional)
+   - **Tap Sync** — Start sync, press `Space` on each word as you hear it. The stage stays locked to the current line (no racing words). `Esc` stops.
+   - **Offset** — nudge all timings with the global offset slider.
+5. **Play** — words light up (hot pink / cyan glow) in the lyric bar on the bottom 20% of the stage.
+6. **Export** — records stage + audio to a downloadable **WebM** (VP8/VP9 + Opus when supported).
+7. **Share** — copy a project link with title, lyrics, timings, and stock backdrop id. Recipients re-upload audio/image (media is not embedded in the URL).
 
 Projects also auto-save metadata to `localStorage`.
+
+### Notes on auto lyrics
+
+- Works best with **clear vocals** (karaoke / acapella / lightly mixed tracks). Heavy instrumentals reduce accuracy.
+- Browser model is English-optimized (`whisper-base.en`). For other languages, set `OPENAI_API_KEY` for multilingual Whisper.
+- Server uploads are limited to ~24MB.
 
 ## Deploy on Vercel
 

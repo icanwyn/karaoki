@@ -14,6 +14,7 @@ export default function KaraokePlayer({
   disabled,
   activeWordIndex,
   totalWords,
+  seekDisabled = false,
 }) {
   return (
     <div className="player">
@@ -37,7 +38,8 @@ export default function KaraokePlayer({
             step={0.01}
             value={Math.min(currentTime || 0, duration || 0)}
             onChange={(e) => onSeek?.(Number(e.target.value))}
-            disabled={disabled}
+            disabled={disabled || seekDisabled}
+            title={seekDisabled ? "Seek disabled during tap sync" : undefined}
           />
           <div className="time-row">
             <span>{formatTime(currentTime)}</span>

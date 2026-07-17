@@ -13,7 +13,10 @@ const VideoStage = forwardRef(function VideoStage(
     words,
     lyrics,
     currentTime,
-    offsetSec = 0,
+    /** When true, highlight by syncIndex instead of playhead (prevents race/glitch). */
+    isSyncing = false,
+    /** Index of the next word waiting to be tapped (0-based). */
+    syncIndex = 0,
   },
   ref
 ) {
@@ -25,10 +28,27 @@ const VideoStage = forwardRef(function VideoStage(
     getCanvas: () => canvasRef.current,
   }));
 
-  const t = (currentTime || 0) + (offsetSec || 0);
-  const activeIndex = useMemo(() => indexForTime(words || [], t), [words, t]);
-  const lines = useMemo(() => groupIntoLines(words || [], lyrics), [words, lyrics]);
-  const lineIdx = lineIndexForWord(lines, activeIndex);
+  const lines = useMemo(
+    () => groupIntoLines(words || [], lyrics),
+    [words, lyrics]
+  );
+
+  // During tap-sync: freeze to the line of the next word; never chase provisional times.
+  // During play: normal playhead index.
+  const activeIndex = useMemo(() => {
+    if (!words?.length) return -1;
+    if (isSyncing) {
+      // Last confirmed word is syncIndex - 1; show that as active (or -1 at start).
+      return Math.min(Math.max(syncIndex - 1, -1), words.length - 1);
+    }
+    return indexForTime(words, currentTime || 0);
+  }, [words, currentTime, isSyncing, syncIndex]);
+
+  const focusIndex = isSyncing
+    ? Math.min(Math.max(syncIndex, 0), Math.max(0, (words?.length || 1) - 1))
+    : activeIndex;
+
+  const lineIdx = lineIndexForWord(lines, focusIndex < 0 ? 0 : focusIndex);
   const activeLine = lines[lineIdx];
 
   const bgStyle = imageUrl
@@ -36,7 +56,7 @@ const VideoStage = forwardRef(function VideoStage(
     : { backgroundImage: stockBackground(stockImageId) };
 
   return (
-    <div className="video-stage" ref={stageRef}>
+    <div className={`video-stage${isSyncing ? " is-syncing" : ""}`} ref={stageRef}>
       <div className="stage-bg" style={bgStyle} />
       <canvas ref={canvasRef} width={1280} height={720} style={{ display: "none" }} />
 
@@ -49,16 +69,29 @@ const VideoStage = forwardRef(function VideoStage(
         </div>
       )}
 
+      {isSyncing && (
+        <div className="sync-badge" aria-live="polite">
+          Tap sync · word {Math.min(syncIndex + 1, words?.length || 0)} / {words?.length || 0}
+        </div>
+      )}
+
       <div className="lyric-bar" aria-live="polite">
         {activeLine?.words?.length ? (
           <div className="lyric-line">
             {activeLine.words.map((w, i) => {
               const gi = activeLine.startIndex + i;
               let cls = "kw future";
-              if (gi < activeIndex) cls = "kw past";
-              else if (gi === activeIndex) cls = "kw active";
+              if (isSyncing) {
+                if (gi < syncIndex) cls = "kw past";
+                else if (gi === syncIndex) cls = "kw next";
+                else cls = "kw future";
+              } else if (gi < activeIndex) {
+                cls = "kw past";
+              } else if (gi === activeIndex) {
+                cls = "kw active";
+              }
               return (
-                <span key={`${gi}-${w.text}`} className={cls}>
+                <span key={`w-${gi}`} className={cls}>
                   {w.text}
                 </span>
               );
@@ -68,8 +101,10 @@ const VideoStage = forwardRef(function VideoStage(
           <div className="lyric-line">
             <span className="kw future">
               {words?.length
-                ? "Ready when you are…"
-                : "Add lyrics to light up the stage"}
+                ? isSyncing
+                  ? "Tap Space on each word as you hear it"
+                  : "Ready when you are…"
+                : "Add lyrics or auto-generate from your song"}
             </span>
           </div>
         )}

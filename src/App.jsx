@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import UploadPanel, { STOCK_IMAGES, stockBackground } from "./components/UploadPanel.jsx";
+import UploadPanel, { STOCK_IMAGES } from "./components/UploadPanel.jsx";
 import LyricsEditor from "./components/LyricsEditor.jsx";
 import SyncToolbar from "./components/SyncToolbar.jsx";
 import KaraokePlayer from "./components/KaraokePlayer.jsx";
@@ -18,6 +18,7 @@ import {
   saveProject,
 } from "./lib/storage.js";
 import { exportKaraokeVideo } from "./lib/videoExport.js";
+import { transcribeSong, UNTAPPED_START } from "./lib/transcribe.js";
 
 function revokeIfBlob(url) {
   if (url && url.startsWith("blob:")) {
@@ -87,6 +88,34 @@ function applyOffset(words, offsetSec) {
   }));
 }
 
+/** Seal word ends so they meet the next start cleanly. */
+function sealWordEnds(words, duration = 0) {
+  const fixed = words.map((w) => ({ ...w }));
+  for (let j = 0; j < fixed.length - 1; j++) {
+    if (
+      !Number.isFinite(fixed[j].start) ||
+      fixed[j].start >= UNTAPPED_START / 2
+    ) {
+      continue;
+    }
+    const nextStart = fixed[j + 1].start;
+    if (nextStart < UNTAPPED_START / 2) {
+      fixed[j].end = Math.max(fixed[j].start + 0.05, nextStart);
+    }
+  }
+  if (fixed.length) {
+    const last = fixed[fixed.length - 1];
+    if (last.start < UNTAPPED_START / 2) {
+      const dur = duration || last.end;
+      fixed[fixed.length - 1] = {
+        ...last,
+        end: Math.max(last.start + 0.15, Math.min(dur || last.start + 0.6, last.start + 1.2)),
+      };
+    }
+  }
+  return fixed;
+}
+
 export default function App() {
   const [projectTitle, setProjectTitle] = useState("Untitled karaoke");
   const [audioFile, setAudioFile] = useState(null);
@@ -96,7 +125,7 @@ export default function App() {
   const [stockImageId, setStockImageId] = useState("neon-city");
   const [lyrics, setLyrics] = useState("");
   const [timedWords, setTimedWords] = useState([]);
-  const [status, setStatus] = useState("edit"); // edit | sync | play | export
+  const [status, setStatus] = useState("edit");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -113,10 +142,15 @@ export default function App() {
   const [exportMessage, setExportMessage] = useState("");
   const [shareMessage, setShareMessage] = useState("");
 
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoProgress, setAutoProgress] = useState(0);
+  const [autoStatus, setAutoStatus] = useState("");
+
   const audioRef = useRef(null);
   const stageRef = useRef(null);
   const rafRef = useRef(0);
   const exportAbortRef = useRef(null);
+  const autoAbortRef = useRef(null);
   const isSyncingRef = useRef(false);
   const syncIndexRef = useRef(0);
   const syncBaseRef = useRef([]);
@@ -146,7 +180,9 @@ export default function App() {
     if (local.stockImageId) setStockImageId(local.stockImageId);
     if (local.offset) setOffsetMs(Math.round(local.offset * 1000));
     if (shared) {
-      setExportMessage("Loaded project from share link. Re-upload audio & image to play/export.");
+      setExportMessage(
+        "Loaded project from share link. Re-upload audio & image to play/export."
+      );
     }
   }, []);
 
@@ -176,6 +212,8 @@ export default function App() {
       setIsPlaying(false);
       setCurrentTime(audio.duration || 0);
       if (isSyncingRef.current) {
+        // Seal whatever was tapped and leave sync mode
+        setTimedWords((prev) => sealWordEnds(prev, audio.duration || 0));
         setIsSyncing(false);
         setStatus("edit");
         setMode("edit");
@@ -240,10 +278,10 @@ export default function App() {
     [timedWords, offsetSec]
   );
 
-  const activeWordIndex = useMemo(
-    () => indexForTime(displayWords, currentTime),
-    [displayWords, currentTime]
-  );
+  const activeWordIndex = useMemo(() => {
+    if (isSyncing) return Math.max(syncIndex - 1, -1);
+    return indexForTime(displayWords, currentTime);
+  }, [displayWords, currentTime, isSyncing, syncIndex]);
 
   const wordList = useMemo(() => flattenWords(lyrics), [lyrics]);
 
@@ -281,12 +319,17 @@ export default function App() {
       setStatus("edit");
       return;
     }
-    // Fallback: plain text → estimate if duration known
     if (wordList.length && duration > 0) {
       setTimedWords(estimateTimings(wordList, duration));
       setExportMessage("No LRC tags found — applied auto timings from plain lyrics.");
     } else if (wordList.length) {
-      setTimedWords(wordList.map((text) => ({ text, start: 0, end: 0.4 })));
+      setTimedWords(
+        wordList.map((text) => ({
+          text,
+          start: UNTAPPED_START,
+          end: UNTAPPED_START + 0.05,
+        }))
+      );
       setExportMessage("No LRC tags found. Load audio and Auto-time, or use Tap Sync.");
     } else {
       setExportError("Nothing to parse — paste lyrics or LRC first.");
@@ -322,32 +365,112 @@ export default function App() {
       setTimedWords([]);
       return;
     }
-    setTimedWords(wordList.map((text) => ({ text, start: 0, end: 0.05 })));
+    // Untapped sentinel — never matches playhead, so stage won't race
+    setTimedWords(
+      wordList.map((text) => ({
+        text,
+        start: UNTAPPED_START,
+        end: UNTAPPED_START + 0.05,
+      }))
+    );
     setSyncIndex(0);
     setExportMessage("Timings cleared — ready for Tap Sync.");
   }, [wordList]);
 
-  const handleStartSync = useCallback(async () => {
-    const base =
-      wordList.length > 0
-        ? wordList.map((text) => ({ text, start: 0, end: 0.05 }))
-        : timedWords.map((w) => ({ text: w.text, start: 0, end: 0.05 }));
-    if (!base.length) {
-      setExportError("Add lyrics before syncing.");
+  const handleAutoFromSong = useCallback(async () => {
+    if (!audioFile || autoBusy) {
+      if (!audioFile) setExportError("Upload a song first.");
       return;
     }
+
+    // Cancel any previous run
+    autoAbortRef.current?.abort();
+    const ac = new AbortController();
+    autoAbortRef.current = ac;
+
+    setAutoBusy(true);
+    setAutoProgress(0);
+    setAutoStatus("Starting…");
+    setExportError("");
+    setExportMessage("");
+    setIsSyncing(false);
+    audioRef.current?.pause();
+    setStatus("edit");
+    setMode("edit");
+
+    try {
+      const result = await transcribeSong(audioFile, {
+        signal: ac.signal,
+        onProgress: (p) => {
+          if (typeof p.progress === "number") setAutoProgress(p.progress);
+          if (p.status) setAutoStatus(p.status);
+        },
+      });
+
+      let words = result.words || [];
+      // If we only got text without times, estimate across duration
+      if (!words.length && result.fullText) {
+        const tokens = flattenWords(result.fullText);
+        words = estimateTimings(tokens, duration || 180);
+      }
+
+      const lyricsText = result.lyrics || words.map((w) => w.text).join(" ");
+      setLyrics(lyricsText);
+      setTimedWords(words);
+      setOffsetMs(0);
+      setExportMessage(
+        `Auto-synced ${words.length} words via ${
+          result.provider === "openai" ? "server Whisper" : "on-device Whisper"
+        }. Play to review, then tweak with offset or Tap Sync.`
+      );
+      setExportError("");
+      setStatus("play");
+      setMode("play");
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        setExportMessage("Auto lyrics cancelled.");
+      } else {
+        setExportError(err?.message || "Auto lyrics failed");
+      }
+    } finally {
+      setAutoBusy(false);
+      setAutoProgress(0);
+      setAutoStatus("");
+      autoAbortRef.current = null;
+    }
+  }, [audioFile, autoBusy, duration]);
+
+  const handleStartSync = useCallback(async () => {
+    const texts =
+      wordList.length > 0
+        ? wordList
+        : timedWords.map((w) => w.text).filter(Boolean);
+    if (!texts.length) {
+      setExportError("Add lyrics before syncing (or run Auto lyrics from song).");
+      return;
+    }
+
+    // All words start as untapped sentinels — playhead cannot race through them
+    const base = texts.map((text) => ({
+      text,
+      start: UNTAPPED_START,
+      end: UNTAPPED_START + 0.05,
+    }));
+
     setSyncBaseWords(base);
     setTimedWords(base);
     setSyncIndex(0);
     setIsSyncing(true);
     setStatus("sync");
     setMode("sync");
-    setExportMessage("Sync mode: press Space on each word.");
+    setExportMessage("Sync mode: press Space on each word as you hear it. Esc to stop.");
     setExportError("");
+
     const audio = audioRef.current;
     if (audio && audioUrl) {
       try {
         audio.currentTime = 0;
+        setCurrentTime(0);
         await audio.play();
       } catch {
         setExportError("Could not autoplay — press Play, then Tap.");
@@ -356,6 +479,7 @@ export default function App() {
   }, [wordList, timedWords, audioUrl]);
 
   const handleStopSync = useCallback(() => {
+    setTimedWords((prev) => sealWordEnds(prev, audioRef.current?.duration || 0));
     setIsSyncing(false);
     setStatus("edit");
     setMode("edit");
@@ -375,52 +499,40 @@ export default function App() {
       return;
     }
 
+    const start = Math.max(0, t);
+
+    // Only stamp the tapped word. Leave the rest as UNTAPPED_START so
+    // indexForTime never advances through provisional times (the old glitch).
     setTimedWords((prev) => {
-      const next = prev.length === base.length ? [...prev] : base.map((w) => ({ ...w }));
-      const start = Math.max(0, t);
+      const next =
+        prev.length === base.length
+          ? prev.map((w) => ({ ...w }))
+          : base.map((w) => ({ ...w }));
+
       next[i] = {
-        ...next[i],
         text: base[i].text,
         start,
-        end: start + 0.35,
+        // Hold until next tap (or seal on finish)
+        end: start + 0.8,
       };
-      if (i > 0 && next[i - 1].end > start) {
-        next[i - 1] = { ...next[i - 1], end: start };
-      }
-      // provisional end for remaining
-      for (let j = i + 1; j < next.length; j++) {
-        if (next[j].start < start) {
-          next[j] = { ...next[j], start: start + (j - i) * 0.05, end: start + (j - i + 1) * 0.05 };
-        }
+      if (i > 0 && next[i - 1].start < UNTAPPED_START / 2) {
+        next[i - 1] = {
+          ...next[i - 1],
+          end: Math.max(next[i - 1].start + 0.05, start),
+        };
       }
       return next;
     });
 
     const nextIdx = i + 1;
     setSyncIndex(nextIdx);
+
     if (nextIdx >= base.length) {
       setIsSyncing(false);
       setStatus("play");
       setMode("play");
       setExportMessage("Sync complete — play back to review.");
-      // Fix final word ends using next starts
-      setTimedWords((prev) => {
-        const fixed = prev.map((w) => ({ ...w }));
-        for (let j = 0; j < fixed.length - 1; j++) {
-          if (fixed[j].end > fixed[j + 1].start || fixed[j].end <= fixed[j].start) {
-            fixed[j].end = Math.max(fixed[j].start + 0.05, fixed[j + 1].start);
-          }
-        }
-        if (fixed.length) {
-          const last = fixed[fixed.length - 1];
-          const dur = audioRef.current?.duration || last.end;
-          fixed[fixed.length - 1] = {
-            ...last,
-            end: Math.max(last.start + 0.2, Math.min(dur, last.start + 0.8)),
-          };
-        }
-        return fixed;
-      });
+      setTimedWords((prev) => sealWordEnds(prev, audioRef.current?.duration || 0));
     }
   }, [currentTime]);
 
@@ -445,11 +557,14 @@ export default function App() {
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio || !audioUrl) return;
+    // Don't leave sync mode accidentally mid-sync via play toggle
     if (audio.paused) {
       try {
         await audio.play();
-        setStatus("play");
-        setMode("play");
+        if (!isSyncingRef.current) {
+          setStatus("play");
+          setMode("play");
+        }
       } catch {
         setExportError("Playback blocked — interact with the page and try again.");
       }
@@ -458,14 +573,21 @@ export default function App() {
     }
   }, [audioUrl]);
 
-  const handleSeek = useCallback((t) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = t;
-    setCurrentTime(t);
-  }, []);
+  const handleSeek = useCallback(
+    (t) => {
+      // Seeking during sync would desync taps — block it
+      if (isSyncingRef.current) return;
+      const audio = audioRef.current;
+      if (!audio) return;
+      audio.currentTime = t;
+      setCurrentTime(t);
+    },
+    []
+  );
 
-  const canExport = Boolean(audioUrl && timedWords.length > 0 && (imageUrl || stockImageId));
+  const canExport = Boolean(
+    audioUrl && timedWords.length > 0 && (imageUrl || stockImageId)
+  );
 
   const handleExport = useCallback(async () => {
     if (!canExport || exporting) return;
@@ -480,8 +602,6 @@ export default function App() {
 
     const ac = new AbortController();
     exportAbortRef.current = ac;
-
-    // Pause studio playback to free the element (export uses its own Audio)
     audioRef.current?.pause();
 
     try {
@@ -489,7 +609,14 @@ export default function App() {
       if (!bgUrl) {
         bgUrl = await stockToDataUrl(stockImageId);
       }
-      const words = applyOffset(timedWords, offsetSec);
+      // Drop untapped sentinels if any remain
+      const words = applyOffset(
+        timedWords.filter((w) => w.start < UNTAPPED_START / 2),
+        offsetSec
+      );
+      if (!words.length) {
+        throw new Error("No timed words to export — run Auto lyrics or Tap Sync first.");
+      }
       const blob = await exportKaraokeVideo({
         imageUrl: bgUrl,
         audioUrl,
@@ -537,7 +664,7 @@ export default function App() {
     const url = buildShareUrl({
       projectTitle,
       lyrics,
-      timedWords,
+      timedWords: timedWords.filter((w) => w.start < UNTAPPED_START / 2),
       stockImageId,
       offset: offsetSec,
     });
@@ -546,7 +673,6 @@ export default function App() {
       setShareMessage("Share link copied! Recipients re-upload media to play.");
       setExportError("");
     } catch {
-      // Fallback prompt
       window.prompt("Copy this share link:", url);
     }
   }, [projectTitle, lyrics, timedWords, stockImageId, offsetSec]);
@@ -556,12 +682,19 @@ export default function App() {
       revokeIfBlob(audioUrl);
       revokeIfBlob(imageUrl);
       revokeIfBlob(downloadUrl);
+      autoAbortRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const statusTone =
-    status === "sync" ? "sync" : status === "export" ? "export" : status === "play" ? "play" : "";
+    status === "sync"
+      ? "sync"
+      : status === "export"
+        ? "export"
+        : status === "play"
+          ? "play"
+          : "";
 
   const nextWord =
     isSyncing && syncBaseWords[syncIndex] ? syncBaseWords[syncIndex].text : null;
@@ -599,7 +732,7 @@ export default function App() {
             type="button"
             className="btn btn-export"
             onClick={handleExport}
-            disabled={!canExport || exporting}
+            disabled={!canExport || exporting || autoBusy}
           >
             {exporting ? "Exporting…" : "Export"}
           </button>
@@ -627,6 +760,8 @@ export default function App() {
               words={displayWords}
               lyrics={lyrics}
               currentTime={currentTime}
+              isSyncing={isSyncing}
+              syncIndex={syncIndex}
             />
             <KaraokePlayer
               isPlaying={isPlaying}
@@ -634,9 +769,10 @@ export default function App() {
               duration={duration}
               onTogglePlay={togglePlay}
               onSeek={handleSeek}
-              disabled={!audioUrl}
+              disabled={!audioUrl || autoBusy}
               activeWordIndex={activeWordIndex}
               totalWords={displayWords.length}
+              seekDisabled={isSyncing}
             />
           </div>
         </section>
@@ -649,9 +785,14 @@ export default function App() {
               onParseLrc={handleParseLrc}
               onAutoTime={handleAutoTime}
               onClear={handleClearLyrics}
+              onAutoFromSong={handleAutoFromSong}
               wordCount={wordList.length}
-              timedCount={timedWords.length}
+              timedCount={timedWords.filter((w) => w.start < UNTAPPED_START / 2).length}
               hasDuration={duration > 0}
+              hasAudio={Boolean(audioFile || audioUrl)}
+              autoBusy={autoBusy}
+              autoProgress={autoProgress}
+              autoStatus={autoStatus}
             />
 
             <SyncToolbar
@@ -667,6 +808,7 @@ export default function App() {
               onTap={handleTap}
               hasAudio={Boolean(audioUrl)}
               hasWords={wordList.length > 0 || timedWords.length > 0}
+              disabled={autoBusy}
             />
 
             <ExportPanel

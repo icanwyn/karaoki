@@ -204,6 +204,17 @@ const UNTAPPED_THRESHOLD = 1e8;
  */
 export function indexForTime(words, t) {
   if (!words?.length || t == null || Number.isNaN(t)) return -1;
+
+  // Hard gate: nothing is active before the first timed word
+  const firstStart = words[0]?.start;
+  if (
+    Number.isFinite(firstStart) &&
+    firstStart < UNTAPPED_THRESHOLD &&
+    t < firstStart - 0.02
+  ) {
+    return -1;
+  }
+
   // Binary search by start among timed words only
   let lo = 0;
   let hi = words.length - 1;
@@ -212,7 +223,6 @@ export function indexForTime(words, t) {
     const mid = (lo + hi) >> 1;
     const s = words[mid].start;
     if (s >= UNTAPPED_THRESHOLD) {
-      // Untapped region — search left for last real timing
       hi = mid - 1;
       continue;
     }
@@ -225,14 +235,28 @@ export function indexForTime(words, t) {
   }
   if (ans < 0) return -1;
   if (words[ans].start >= UNTAPPED_THRESHOLD) return -1;
-  // Prefer current window; if past end of last matched, stay on last until next real start
-  if (t < words[ans].end + 0.02) return ans;
+
+  // Only light up while inside [start, end); do NOT keep the first word
+  // glowing through long intros / gaps (that looked like "early highlight").
+  const w = words[ans];
+  const end = Number.isFinite(w.end) ? w.end : w.start + 0.4;
+  if (t >= w.start - 0.02 && t < end + 0.04) return ans;
+
+  // Short gap until next word: keep previous briefly
   if (ans + 1 < words.length) {
     const nextStart = words[ans + 1].start;
-    if (nextStart >= UNTAPPED_THRESHOLD || t < nextStart) return ans;
+    if (
+      nextStart < UNTAPPED_THRESHOLD &&
+      t < nextStart &&
+      nextStart - end < 0.35
+    ) {
+      return ans;
+    }
   }
-  if (ans === words.length - 1) return ans;
-  return ans;
+
+  // Past last word end — stay on last only for a short tail
+  if (ans === words.length - 1 && t < end + 0.5) return ans;
+  return -1;
 }
 
 /**

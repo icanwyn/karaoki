@@ -7,24 +7,26 @@
  */
 
 import {
-  alignWordsToOnset,
   clampWordsToDuration,
   decodeMono16k,
   estimateTimingsInWindow,
   findActiveWindow,
-  findEnergyOnset,
+  snapTimingsToAudio,
   timingsLookValid,
 } from "./audioAlign.js";
 
 const FAR = 1e9;
-const MODEL_ID = "Xenova/whisper-tiny.en";
-// q8/MatMulNBits often crashes browser WASM ("TransposeDQWeightsForMatMulNBits").
-// Prefer fp32 (compatible). Fall back through other dtypes if needed.
-const DTYPE_CANDIDATES = ["fp32", "fp16", "q8"];
+// base.en is more accurate than tiny for sung lyrics (still free, still local).
+// Fall back to tiny if base fails to load.
+const MODEL_CANDIDATES = [
+  { id: "Xenova/whisper-base.en", dtypes: ["fp32", "fp16"] },
+  { id: "Xenova/whisper-tiny.en", dtypes: ["fp32", "fp16"] },
+];
 
 /** @type {Promise<any> | null} */
 let pipePromise = null;
 let activeDtype = "";
+let activeModelId = "";
 
 /**
  * @typedef {{ text: string, start: number, end: number }} TimedWord
@@ -109,17 +111,11 @@ function finalizeResult(result, decoded, duration, onProgress) {
   let provider = result.provider || "unknown";
   const fullText = (result.fullText || words.map((w) => w.text).join(" ")).trim();
 
-  if (words.length && decoded?.samples?.length) {
-    const onset = findEnergyOnset(decoded.samples, decoded.sampleRate);
-    const aligned = alignWordsToOnset(words, onset);
-    words = aligned.words;
-    appliedShiftSec = aligned.appliedShiftSec || 0;
-  }
-
+  // Rebuild if timestamps are junk / crushed into the intro
   if ((!timingsLookValid(words, duration) || !words.length) && fullText) {
     onProgress?.({
       phase: "estimate",
-      progress: 0.96,
+      progress: 0.92,
       status: "Rebuilding timings from transcript + audio energy…",
     });
     const tokens = fullText.split(/\s+/).filter(Boolean);
@@ -130,7 +126,7 @@ function finalizeResult(result, decoded, duration, onProgress) {
       start = win.start;
       end = win.end;
     } else {
-      start = Math.min(2, end * 0.05);
+      start = Math.min(3, end * 0.08);
       end = end * 0.98;
     }
     words = estimateTimingsInWindow(tokens, start, end);
@@ -140,7 +136,24 @@ function finalizeResult(result, decoded, duration, onProgress) {
     if (!String(provider).includes("estimate")) provider = `${provider}+estimate`;
   }
 
-  if (duration) words = clampWordsToDuration(words, duration);
+  // Snap to silence/content so highlights never fire before the track has sound
+  if (words.length && decoded?.samples?.length) {
+    onProgress?.({
+      phase: "align",
+      progress: 0.96,
+      status: "Aligning lyrics after silence / intro…",
+    });
+    const snapped = snapTimingsToAudio(
+      words,
+      decoded.samples,
+      decoded.sampleRate
+    );
+    words = snapped.words;
+    appliedShiftSec = snapped.appliedShiftSec || 0;
+    if (snapped.note) note = (note ? note + " " : "") + snapped.note;
+  } else if (duration) {
+    words = clampWordsToDuration(words, duration);
+  }
 
   if (!words.length) {
     throw new Error(
@@ -148,15 +161,23 @@ function finalizeResult(result, decoded, duration, onProgress) {
     );
   }
 
-  onProgress?.({ phase: "done", progress: 1, status: `Done — ${words.length} words` });
+  // Rebuild display lyrics from final word list so text matches timed words
+  const lyrics = wordsToLyrics(words);
+
+  onProgress?.({
+    phase: "done",
+    progress: 1,
+    status: `Done — ${words.length} words (first at ${words[0].start.toFixed(1)}s)`,
+  });
 
   return {
-    lyrics: result.lyrics || wordsToLyrics(words),
+    lyrics,
     words,
     provider,
     fullText: fullText || words.map((w) => w.text).join(" "),
     appliedShiftSec,
     note,
+    firstWordAt: words[0].start,
   };
 }
 
@@ -196,7 +217,6 @@ async function getTranscriber(onProgress) {
     env.allowLocalModels = false;
     env.useBrowserCache = true;
     try {
-      // Browser WASM is more stable single-threaded; avoids some session init races
       if (env.backends?.onnx?.wasm) {
         env.backends.onnx.wasm.numThreads = 1;
         env.backends.onnx.wasm.simd = true;
@@ -206,51 +226,63 @@ async function getTranscriber(onProgress) {
     }
 
     let lastErr = null;
-    for (const dtype of DTYPE_CANDIDATES) {
-      try {
-        onProgress?.({
-          phase: "model",
-          progress: 0.18,
-          status: `Loading Whisper (${dtype})… first run downloads model weights`,
-        });
+    for (const model of MODEL_CANDIDATES) {
+      for (const dtype of model.dtypes) {
+        try {
+          onProgress?.({
+            phase: "model",
+            progress: 0.16,
+            status: `Loading ${model.id.split("/").pop()} (${dtype})…`,
+          });
 
-        const pipe = await pipeline("automatic-speech-recognition", MODEL_ID, {
-          dtype,
-          progress_callback: (p) => {
-            if (!p) return;
-            const pct = typeof p.progress === "number" ? p.progress : 0;
-            const frac = Math.min(0.55, 0.18 + (pct / 100) * 0.35);
-            onProgress?.({
-              phase: "model",
-              progress: frac,
-              status:
-                p.status === "done"
-                  ? `Model ready (${dtype})`
-                  : `Downloading ${dtype} model… ${Math.round(pct)}%`,
-            });
-          },
-        });
+          const pipe = await pipeline("automatic-speech-recognition", model.id, {
+            dtype,
+            progress_callback: (p) => {
+              if (!p) return;
+              const pct = typeof p.progress === "number" ? p.progress : 0;
+              const frac = Math.min(0.55, 0.16 + (pct / 100) * 0.36);
+              onProgress?.({
+                phase: "model",
+                progress: frac,
+                status:
+                  p.status === "done"
+                    ? `Model ready (${model.id.split("/").pop()} / ${dtype})`
+                    : `Downloading model… ${Math.round(pct)}%`,
+              });
+            },
+          });
 
-        // Warm session with a tiny buffer so MatMul/qdq errors surface at load time,
-        // not after a full song wait.
-        onProgress?.({
-          phase: "model",
-          progress: 0.56,
-          status: `Warming up ONNX session (${dtype})…`,
-        });
-        const warm = new Float32Array(16000); // 1s silence
-        await pipe(warm);
-        activeDtype = dtype;
-        console.info("[karaoki] whisper session ready", { model: MODEL_ID, dtype });
-        return pipe;
-      } catch (err) {
-        lastErr = err;
-        console.warn(`[karaoki] dtype ${dtype} failed`, err?.message || err);
-        onProgress?.({
-          phase: "model",
-          progress: 0.2,
-          status: `${dtype} failed (${shortErr(err).slice(0, 48)}) — trying next…`,
-        });
+          onProgress?.({
+            phase: "model",
+            progress: 0.56,
+            status: `Warming up ONNX session…`,
+          });
+          // Short non-silent chirp — pure silence sometimes confuses warm-up
+          const warm = new Float32Array(16000);
+          for (let i = 0; i < warm.length; i++) {
+            warm[i] = Math.sin((2 * Math.PI * 440 * i) / 16000) * 0.02;
+          }
+          await pipe(warm);
+
+          activeDtype = dtype;
+          activeModelId = model.id;
+          console.info("[karaoki] whisper session ready", {
+            model: model.id,
+            dtype,
+          });
+          return pipe;
+        } catch (err) {
+          lastErr = err;
+          console.warn(
+            `[karaoki] ${model.id} / ${dtype} failed`,
+            err?.message || err
+          );
+          onProgress?.({
+            phase: "model",
+            progress: 0.18,
+            status: `${dtype} failed — trying next…`,
+          });
+        }
       }
     }
 
@@ -258,6 +290,7 @@ async function getTranscriber(onProgress) {
   })().catch((err) => {
     pipePromise = null;
     activeDtype = "";
+    activeModelId = "";
     throw err;
   });
 
@@ -398,7 +431,9 @@ async function transcribeInBrowser(audioFile, decoded, { onProgress, signal } = 
     return {
       lyrics: wordsToLyrics(parsed.words) || wrapTextAsLyrics(parsed.fullText),
       words: parsed.words,
-      provider: activeDtype ? `browser-whisper/${activeDtype}` : "browser-whisper",
+      provider: activeModelId
+        ? `browser-whisper/${activeModelId.split("/").pop()}/${activeDtype}`
+        : "browser-whisper",
       fullText: parsed.fullText,
       note: parsed.note,
     };

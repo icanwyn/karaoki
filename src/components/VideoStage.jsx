@@ -13,9 +13,7 @@ const VideoStage = forwardRef(function VideoStage(
     words,
     lyrics,
     currentTime,
-    /** When true, highlight by syncIndex instead of playhead (prevents race/glitch). */
     isSyncing = false,
-    /** Index of the next word waiting to be tapped (0-based). */
     syncIndex = 0,
   },
   ref
@@ -33,12 +31,16 @@ const VideoStage = forwardRef(function VideoStage(
     [words, lyrics]
   );
 
-  // During tap-sync: freeze to the line of the next word; never chase provisional times.
-  // During play: normal playhead index.
+  const firstStart = words?.[0]?.start;
+  const beforeLyrics =
+    !isSyncing &&
+    Number.isFinite(firstStart) &&
+    firstStart > 0.15 &&
+    (currentTime || 0) < firstStart - 0.02;
+
   const activeIndex = useMemo(() => {
     if (!words?.length) return -1;
     if (isSyncing) {
-      // Last confirmed word is syncIndex - 1; show that as active (or -1 at start).
       return Math.min(Math.max(syncIndex - 1, -1), words.length - 1);
     }
     return indexForTime(words, currentTime || 0);
@@ -46,14 +48,21 @@ const VideoStage = forwardRef(function VideoStage(
 
   const focusIndex = isSyncing
     ? Math.min(Math.max(syncIndex, 0), Math.max(0, (words?.length || 1) - 1))
-    : activeIndex;
+    : activeIndex >= 0
+      ? activeIndex
+      : 0;
 
-  const lineIdx = lineIndexForWord(lines, focusIndex < 0 ? 0 : focusIndex);
+  const lineIdx = lineIndexForWord(lines, focusIndex);
   const activeLine = lines[lineIdx];
 
   const bgStyle = imageUrl
     ? { backgroundImage: `url(${imageUrl})` }
     : { backgroundImage: stockBackground(stockImageId) };
+
+  const waitSec =
+    beforeLyrics && Number.isFinite(firstStart)
+      ? Math.max(0, firstStart - (currentTime || 0))
+      : 0;
 
   return (
     <div className={`video-stage${isSyncing ? " is-syncing" : ""}`} ref={stageRef}>
@@ -76,7 +85,13 @@ const VideoStage = forwardRef(function VideoStage(
       )}
 
       <div className="lyric-bar" aria-live="polite">
-        {activeLine?.words?.length ? (
+        {beforeLyrics ? (
+          <div className="lyric-line lyric-wait">
+            <span className="kw future">
+              Lyrics start in {waitSec.toFixed(1)}s…
+            </span>
+          </div>
+        ) : activeLine?.words?.length ? (
           <div className="lyric-line">
             {activeLine.words.map((w, i) => {
               const gi = activeLine.startIndex + i;
@@ -85,6 +100,8 @@ const VideoStage = forwardRef(function VideoStage(
                 if (gi < syncIndex) cls = "kw past";
                 else if (gi === syncIndex) cls = "kw next";
                 else cls = "kw future";
+              } else if (activeIndex < 0) {
+                cls = "kw future";
               } else if (gi < activeIndex) {
                 cls = "kw past";
               } else if (gi === activeIndex) {

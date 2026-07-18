@@ -466,9 +466,10 @@ export default function App() {
 
       setExportMessage(
         `✓ Auto-synced ${words.length} words (${providerLabel}). ` +
-          `Timing span ${span.toFixed(1)}s starting at ${first.start.toFixed(1)}s. ` +
+          `First highlight at ${first.start.toFixed(1)}s · span ${span.toFixed(1)}s. ` +
           `${extra} ` +
-          `Play to check — use Global offset if everything is early/late, Tap Sync if individual words are wrong.`
+          `Free Whisper often mis-hears sung lyrics — paste official lyrics + Auto-time for accuracy, ` +
+          `or Tap Sync. Global offset if everything is still early/late together.`
       );
       setExportError("");
       setStatus("play");

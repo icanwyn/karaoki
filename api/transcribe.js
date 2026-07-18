@@ -1,15 +1,19 @@
 /**
- * Vercel serverless: OpenAI Whisper with word timestamps.
- * Optional form field "prompt" = known lyrics (guides model + used only server-side).
+ * Server transcription → SRT + word timings.
+ *
+ * Providers (first available):
+ * 1. GROQ_API_KEY  → free-tier Whisper large-v3 (fast)
+ * 2. OPENAI_API_KEY → whisper-1
+ *
+ * Always returns { text, srt, words, provider }.
  */
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
+  maxDuration: 60,
 };
 
-const MAX_BYTES = 24 * 1024 * 1024;
+const MAX_BYTES = 4.2 * 1024 * 1024;
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -21,24 +25,19 @@ export default async function handler(req, res) {
     res.end();
     return;
   }
-
   if (req.method !== "POST") {
-    res.statusCode = 405;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ error: "method_not_allowed" }));
+    json(res, 405, { error: "method_not_allowed" });
     return;
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    res.statusCode = 503;
-    res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        error: "not_configured",
-        message: "OPENAI_API_KEY not configured — client will use on-device Whisper",
-      })
-    );
+  const groqKey = process.env.GROQ_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!groqKey && !openaiKey) {
+    json(res, 503, {
+      error: "not_configured",
+      message:
+        "Set GROQ_API_KEY (free at console.groq.com) or OPENAI_API_KEY on Vercel.",
+    });
     return;
   }
 
@@ -46,124 +45,204 @@ export default async function handler(req, res) {
     const parts = await readMultipart(req);
     const filePart = parts.file;
     if (!filePart?.buffer?.length) {
-      res.statusCode = 400;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: "missing_file", message: "Audio file is required" }));
+      json(res, 400, { error: "missing_file", message: "Audio file required" });
       return;
     }
     if (filePart.buffer.length > MAX_BYTES) {
-      res.statusCode = 413;
-      res.setHeader("Content-Type", "application/json");
-      res.end(
-        JSON.stringify({
-          error: "file_too_large",
-          message: "Audio must be under 24MB for server transcription.",
-        })
-      );
+      json(res, 413, {
+        error: "file_too_large",
+        message: `Audio too large (${(filePart.buffer.length / 1024 / 1024).toFixed(1)}MB). App should compress first.`,
+      });
       return;
     }
 
-    // Whisper prompt is capped (~224 tokens); send a compact lyric guide
-    const promptRaw = String(parts.fields.prompt || "").trim();
-    const prompt = promptRaw ? promptRaw.slice(0, 800) : "";
+    const prompt = String(parts.fields.prompt || "").trim().slice(0, 800);
+    const format = String(parts.fields.format || "srt").toLowerCase(); // srt | verbose
 
-    const form = new FormData();
-    const blob = new Blob([filePart.buffer], {
-      type: filePart.contentType || "audio/mpeg",
-    });
-    form.append("file", blob, filePart.filename || "audio.mp3");
-    form.append("model", "whisper-1");
-    form.append("response_format", "verbose_json");
-    form.append("timestamp_granularities[]", "word");
-    if (prompt) form.append("prompt", prompt);
+    let result;
+    let lastErr = "";
 
-    const openaiRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: form,
-    });
-
-    const raw = await openaiRes.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = { error: raw };
-    }
-
-    if (!openaiRes.ok) {
-      res.statusCode = openaiRes.status === 401 ? 401 : 502;
-      res.setHeader("Content-Type", "application/json");
-      res.end(
-        JSON.stringify({
-          error: "openai_error",
-          message: data?.error?.message || String(raw).slice(0, 400),
-        })
-      );
-      return;
-    }
-
-    const words = (data.words || [])
-      .map((w) => ({
-        text: String(w.word || w.text || "").trim(),
-        start: Number(w.start) || 0,
-        end: Number(w.end) || 0,
-      }))
-      .filter((w) => w.text);
-
-    let timed = words;
-    if (!timed.length && Array.isArray(data.segments)) {
-      timed = [];
-      for (const seg of data.segments) {
-        const tokens = String(seg.text || "")
-          .trim()
-          .split(/\s+/)
-          .filter(Boolean);
-        if (!tokens.length) continue;
-        const s = Number(seg.start) || 0;
-        const e = Number(seg.end) || s + tokens.length * 0.3;
-        const step = Math.max(0.05, (e - s) / tokens.length);
-        tokens.forEach((tok, i) => {
-          timed.push({
-            text: tok,
-            start: s + i * step,
-            end: s + (i + 1) * step,
-          });
+    // Prefer Groq (free, fast) when configured
+    if (groqKey) {
+      try {
+        result = await runWhisperApi({
+          baseUrl: "https://api.groq.com/openai/v1",
+          apiKey: groqKey,
+          model: "whisper-large-v3",
+          filePart,
+          prompt,
+          format,
+          provider: "groq",
         });
+      } catch (e) {
+        lastErr = e?.message || String(e);
+        console.error("[transcribe] groq failed", lastErr);
       }
     }
 
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        text: data.text || "",
-        words: timed,
-        lyrics: wordsToLyrics(timed),
-      })
-    );
+    if (!result && openaiKey) {
+      try {
+        result = await runWhisperApi({
+          baseUrl: "https://api.openai.com/v1",
+          apiKey: openaiKey,
+          model: "whisper-1",
+          filePart,
+          prompt,
+          format,
+          provider: "openai",
+        });
+      } catch (e) {
+        lastErr = e?.message || String(e);
+        console.error("[transcribe] openai failed", lastErr);
+      }
+    }
+
+    if (!result) {
+      json(res, 502, {
+        error: "transcription_failed",
+        message: lastErr || "All providers failed",
+      });
+      return;
+    }
+
+    json(res, 200, result);
   } catch (err) {
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        error: "server_error",
-        message: err?.message || "Transcription failed",
-      })
-    );
+    console.error("[transcribe]", err);
+    json(res, 500, {
+      error: "server_error",
+      message: err?.message || "Transcription failed",
+    });
   }
 }
 
-function wordsToLyrics(words) {
-  if (!words?.length) return "";
+async function runWhisperApi({
+  baseUrl,
+  apiKey,
+  model,
+  filePart,
+  prompt,
+  format,
+  provider,
+}) {
+  // Prefer SRT — simple, widely supported, has phrase timestamps
+  const form = new FormData();
+  const blob = new Blob([filePart.buffer], {
+    type: filePart.contentType || "audio/wav",
+  });
+  form.append("file", blob, filePart.filename || "audio.wav");
+  form.append("model", model);
+  form.append("response_format", "srt");
+  if (prompt) form.append("prompt", prompt);
+
+  const res = await fetch(`${baseUrl}/audio/transcriptions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+
+  const raw = await res.text();
+  if (!res.ok) {
+    let msg = raw.slice(0, 400);
+    try {
+      const j = JSON.parse(raw);
+      msg = j?.error?.message || j?.message || msg;
+    } catch {
+      /* keep */
+    }
+    throw new Error(`${provider}: ${msg}`);
+  }
+
+  // Groq/OpenAI with response_format=srt return plain text SRT
+  const srt = raw.trim();
+  if (!srt || (!srt.includes("-->") && srt.length < 10)) {
+    // Some providers might still return JSON — try parse
+    try {
+      const j = JSON.parse(raw);
+      if (j.text) {
+        return {
+          provider,
+          text: j.text,
+          srt: textToRoughSrt(j.text),
+          words: textToRoughWords(j.text),
+        };
+      }
+    } catch {
+      /* fall through */
+    }
+    throw new Error(`${provider}: empty SRT response`);
+  }
+
+  const words = srtToWordsServer(srt);
+  const text = words.map((w) => w.text).join(" ");
+
+  return {
+    provider,
+    text,
+    srt,
+    words,
+    lyrics: wordsToLines(words),
+  };
+}
+
+function srtToWordsServer(raw) {
+  const text = String(raw || "").replace(/\r\n/g, "\n").trim();
+  const blocks = text.split(/\n\s*\n/);
+  const words = [];
+  for (const block of blocks) {
+    const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    let i = 0;
+    if (/^\d+$/.test(lines[0])) i = 1;
+    if (i >= lines.length) continue;
+    const timeLine = lines[i];
+    if (!timeLine.includes("-->")) continue;
+    const [a, b] = timeLine.split(/\s*-->\s*/);
+    const start = parseTs(a);
+    const end = parseTs((b || "").split(/\s+/)[0]);
+    const cueText = lines
+      .slice(i + 1)
+      .join(" ")
+      .replace(/<[^>]+>/g, "")
+      .trim();
+    if (!cueText) continue;
+    const tokens = cueText.split(/\s+/).filter(Boolean);
+    const span = Math.max(0.12 * tokens.length, (end || start + 1) - start);
+    const step = span / tokens.length;
+    tokens.forEach((tok, k) => {
+      const s = start + k * step;
+      words.push({
+        text: tok.replace(/^["'([{]+|["',.!?;:)\]}]+$/g, "") || tok,
+        start: s,
+        end: s + Math.max(0.06, step * 0.9),
+      });
+    });
+  }
+  return words;
+}
+
+function parseTs(ts) {
+  const s = String(ts || "")
+    .trim()
+    .replace(",", ".");
+  const p = s.split(":");
+  if (p.length === 3) {
+    return (
+      (Number(p[0]) || 0) * 3600 +
+      (Number(p[1]) || 0) * 60 +
+      (Number(p[2]) || 0)
+    );
+  }
+  if (p.length === 2) return (Number(p[0]) || 0) * 60 + (Number(p[1]) || 0);
+  return Number(s) || 0;
+}
+
+function wordsToLines(words) {
   const lines = [];
   let buf = [];
   for (let i = 0; i < words.length; i++) {
     buf.push(words[i].text);
     const gap =
-      i + 1 < words.length ? words[i + 1].start - words[i].end : Number.POSITIVE_INFINITY;
+      i + 1 < words.length ? words[i + 1].start - words[i].end : 99;
     if (gap > 0.55 || buf.length >= 8 || i === words.length - 1) {
       lines.push(buf.join(" "));
       buf = [];
@@ -172,49 +251,68 @@ function wordsToLyrics(words) {
   return lines.join("\n");
 }
 
+function textToRoughSrt(text) {
+  const words = text.split(/\s+/).filter(Boolean);
+  // fake 0.35s/word
+  let t = 0;
+  let out = "";
+  let n = 1;
+  for (let i = 0; i < words.length; i += 8) {
+    const chunk = words.slice(i, i + 8);
+    const start = t;
+    const end = t + chunk.length * 0.35;
+    out += `${n++}\n${fmt(start)} --> ${fmt(end)}\n${chunk.join(" ")}\n\n`;
+    t = end + 0.2;
+  }
+  return out;
+}
+
+function textToRoughWords(text) {
+  return text
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w, i) => ({
+      text: w,
+      start: i * 0.35,
+      end: i * 0.35 + 0.3,
+    }));
+}
+
+function fmt(sec) {
+  const t = Math.max(0, sec);
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = Math.floor(t % 60);
+  const ms = Math.round((t % 1) * 1000);
+  return `${pad(h)}:${pad(m)}:${pad(s)},${String(ms).padStart(3, "0")}`;
+}
+function pad(n) {
+  return String(n).padStart(2, "0");
+}
+
+function json(res, code, obj) {
+  res.statusCode = code;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(obj));
+}
+
 async function readMultipart(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const buffer = Buffer.concat(chunks);
   const contentType = req.headers["content-type"] || "";
   const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
-
-  /** @type {{ file: any, fields: Record<string, string> }} */
   const out = { file: null, fields: {} };
-
   if (!boundaryMatch) {
     out.file = {
       buffer,
-      filename: "audio.mp3",
-      contentType: contentType || "application/octet-stream",
+      filename: "audio.wav",
+      contentType: "application/octet-stream",
     };
     return out;
   }
-
   const boundary = boundaryMatch[1] || boundaryMatch[2];
-  const parts = splitMultipart(buffer, boundary);
-  for (const part of parts) {
-    const nameMatch = /name="([^"]+)"/i.exec(part.headers);
-    const name = nameMatch?.[1];
-    if (!name) continue;
-    if (name === "file") {
-      const fn = /filename="([^"]*)"/i.exec(part.headers);
-      const typeMatch = /Content-Type:\s*([^\r\n]+)/i.exec(part.headers);
-      out.file = {
-        buffer: part.body,
-        filename: fn?.[1] || "audio.mp3",
-        contentType: typeMatch?.[1]?.trim() || "application/octet-stream",
-      };
-    } else {
-      out.fields[name] = part.body.toString("utf8").replace(/\0/g, "").trim();
-    }
-  }
-  return out;
-}
-
-function splitMultipart(buffer, boundary) {
   const sep = Buffer.from(`--${boundary}`);
-  const parts = [];
   let start = buffer.indexOf(sep) + sep.length;
   while (start < buffer.length) {
     if (buffer[start] === 45 && buffer[start + 1] === 45) break;
@@ -222,25 +320,43 @@ function splitMultipart(buffer, boundary) {
     const next = buffer.indexOf(sep, start);
     const end = next === -1 ? buffer.length : next;
     let slice = buffer.subarray(start, end);
-    if (slice.length >= 2 && slice[slice.length - 2] === 13 && slice[slice.length - 1] === 10) {
+    if (
+      slice.length >= 2 &&
+      slice[slice.length - 2] === 13 &&
+      slice[slice.length - 1] === 10
+    ) {
       slice = slice.subarray(0, slice.length - 2);
     }
-    const headerEnd = indexOfDoubleCrlf(slice);
+    let headerEnd = -1;
+    for (let i = 0; i < slice.length - 3; i++) {
+      if (
+        slice[i] === 13 &&
+        slice[i + 1] === 10 &&
+        slice[i + 2] === 13 &&
+        slice[i + 3] === 10
+      ) {
+        headerEnd = i;
+        break;
+      }
+    }
     if (headerEnd !== -1) {
       const headers = slice.subarray(0, headerEnd).toString("utf8");
       const body = slice.subarray(headerEnd + 4);
-      parts.push({ headers, body });
+      const nameMatch = /name="([^"]+)"/i.exec(headers);
+      const name = nameMatch?.[1];
+      if (name === "file") {
+        const fn = /filename="([^"]*)"/i.exec(headers);
+        const typeMatch = /Content-Type:\s*([^\r\n]+)/i.exec(headers);
+        out.file = {
+          buffer: body,
+          filename: fn?.[1] || "audio.wav",
+          contentType: typeMatch?.[1]?.trim() || "audio/wav",
+        };
+      } else if (name) {
+        out.fields[name] = body.toString("utf8").replace(/\0/g, "").trim();
+      }
     }
     start = next === -1 ? buffer.length : next + sep.length;
   }
-  return parts;
-}
-
-function indexOfDoubleCrlf(buf) {
-  for (let i = 0; i < buf.length - 3; i++) {
-    if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 13 && buf[i + 3] === 10) {
-      return i;
-    }
-  }
-  return -1;
+  return out;
 }

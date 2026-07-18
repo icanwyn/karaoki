@@ -1,108 +1,54 @@
 /**
- * Sync known lyrics to a song without freezing the UI.
- *
- * Strategy (never loads browser Whisper / transformers.js):
- * 1. OpenAI Whisper via /api/transcribe (network-only — keeps UI responsive)
- * 2. Align your exact words onto ASR timestamps
- * 3. If server fails → fast energy-based placement (no ML)
+ * Caption-first sync: compress audio → free/server Whisper → SRT → word timings.
+ * Never loads in-browser ML (no freeze).
  */
 
+import { compressAudioForUpload } from "./compressAudio.js";
+import { srtToWords, wordsToSrt, looksLikeSrt, parseSrt } from "./srt.js";
 import { alignLyricsToAsr, alignmentMatchRate, tokenizeLyricWords } from "./alignLyrics.js";
 import { energySyncLyrics } from "./energySync.js";
 
 /**
+ * Transcribe song → SRT + timed words (server only).
  * @param {File|Blob} file
- * @param {string} lyricsText
  * @param {{
  *   onProgress?: (p: { progress?: number, status?: string }) => void,
  *   signal?: AbortSignal,
- *   durationHint?: number,
+ *   prompt?: string,
  * }} [opts]
  */
-export async function syncLyricsToAudio(file, lyricsText, opts = {}) {
-  const { onProgress, signal, durationHint = 0 } = opts;
-  const words = tokenizeLyricWords(lyricsText);
-  if (!words.length) throw new Error("Paste lyrics first");
+export async function transcribeToSrt(file, opts = {}) {
+  const { onProgress, signal, prompt = "" } = opts;
   if (!file) throw new Error("Upload a song first");
 
-  // --- 1) Server Whisper only (does not block the main thread like in-browser ML) ---
-  try {
-    onProgress?.({ progress: 0.08, status: "Uploading to server Whisper…" });
-    const asr = await transcribeServerOnly(file, lyricsText, { signal, onProgress });
-    throwIfAborted(signal);
+  onProgress?.({ progress: 0.05, status: "Compressing audio for upload…" });
+  const compressed = await compressAudioForUpload(file, { onProgress, signal });
+  throwIfAborted(signal);
 
-    onProgress?.({ progress: 0.88, status: "Aligning your lyrics to timestamps…" });
-    await yieldToUi();
-
-    const match = alignmentMatchRate(words, asr.words);
-    const aligned = alignLyricsToAsr(words, asr.words, {
-      duration: durationHint || asr.words.at(-1)?.end || 0,
-    });
-
-    if (aligned.length && match >= 0.12) {
-      onProgress?.({ progress: 1, status: "Done" });
-      return {
-        words: aligned,
-        method: "server-whisper+align",
-        match,
-        provider: "openai",
-        firstAt: aligned[0].start,
-        note: `Aligned with server Whisper (match ~${Math.round(match * 100)}%).`,
-      };
-    }
-
+  if (compressed.truncated) {
     onProgress?.({
-      progress: 0.5,
-      status: "Server times were weak — using energy sync…",
-    });
-  } catch (err) {
-    if (err?.name === "AbortError") throw err;
-    console.warn("[karaoki] server sync failed, using energy", err?.message || err);
-    onProgress?.({
-      progress: 0.35,
-      status: `Server unavailable (${short(err)}) — energy sync…`,
+      progress: 0.4,
+      status: `Note: long track trimmed to ~${compressed.duration.toFixed(0)}s for free API limits…`,
     });
   }
 
-  // --- 2) Energy fallback (always responsive) ---
-  const energy = await energySyncLyrics(file, words, {
-    onProgress,
-    signal,
-    durationHint,
-  });
+  onProgress?.({ progress: 0.45, status: "Uploading for SRT transcription…" });
 
-  return {
-    words: energy.words,
-    method: "energy",
-    match: 0,
-    provider: "energy",
-    firstAt: energy.firstAt,
-    note: "Timed from audio energy (no ML). Refine with Global offset or Tap Sync.",
-  };
-}
-
-/**
- * Server-only transcription. Never falls back to browser Whisper.
- */
-async function transcribeServerOnly(file, prompt, { signal, onProgress } = {}) {
   const form = new FormData();
-  const name = file instanceof File && file.name ? file.name : "song.mp3";
-  form.append("file", file, name);
+  form.append("file", compressed.blob, compressed.filename);
+  form.append("format", "srt");
   if (prompt) form.append("prompt", String(prompt).slice(0, 800));
 
-  // Hard timeout so we never hang the UI spinner forever
-  const timeoutMs = 120_000;
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   signal?.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const timer = setTimeout(() => ctrl.abort(), 120_000);
 
-  // Fake progress while waiting on network
-  let tick = 0.1;
+  let tick = 0.5;
   const prog = setInterval(() => {
-    tick = Math.min(0.8, tick + 0.03);
-    onProgress?.({ progress: tick, status: "Server Whisper is processing…" });
-  }, 800);
+    tick = Math.min(0.9, tick + 0.02);
+    onProgress?.({ progress: tick, status: "Transcribing → SRT captions…" });
+  }, 700);
 
   try {
     const res = await fetch("/api/transcribe", {
@@ -114,17 +60,33 @@ async function transcribeServerOnly(file, prompt, { signal, onProgress } = {}) {
     if (!res.ok) {
       throw new Error(data.message || data.error || `HTTP ${res.status}`);
     }
-    const words = (data.words || [])
-      .map((w) => ({
-        text: String(w.text || w.word || "").trim(),
-        start: Number(w.start) || 0,
-        end: Number(w.end) || 0,
-      }))
-      .filter((w) => w.text);
-    if (!words.length && !data.text) {
-      throw new Error("Server returned no words");
+
+    let srt = data.srt || "";
+    let words = Array.isArray(data.words) ? data.words : [];
+
+    if (srt && !words.length) {
+      words = srtToWords(srt);
     }
-    return { words, text: data.text || "" };
+    if (!srt && words.length) {
+      srt = wordsToSrt(words);
+    }
+    if (!words.length && data.text) {
+      // last resort: no timestamps
+      throw new Error("Got text but no SRT timestamps. Try uploading an .srt file.");
+    }
+    if (!words.length) {
+      throw new Error("Empty transcription. Try a clearer vocal track or upload SRT.");
+    }
+
+    onProgress?.({ progress: 1, status: "Done" });
+    return {
+      srt,
+      words,
+      text: data.text || words.map((w) => w.text).join(" "),
+      lyrics: data.lyrics || cuesToLyrics(srt) || wordsToLines(words),
+      provider: data.provider || "server",
+      truncated: compressed.truncated,
+    };
   } finally {
     clearTimeout(timer);
     clearInterval(prog);
@@ -132,14 +94,145 @@ async function transcribeServerOnly(file, prompt, { signal, onProgress } = {}) {
   }
 }
 
+/**
+ * Sync user's lyrics to audio using SRT transcription + alignment,
+ * or energy fallback. Also accepts raw SRT as lyricsText.
+ */
+export async function syncLyricsToAudio(file, lyricsText, opts = {}) {
+  const { onProgress, signal, durationHint = 0 } = opts;
+
+  // If user pasted SRT, just parse it — no network
+  if (looksLikeSrt(lyricsText)) {
+    onProgress?.({ progress: 0.5, status: "Parsing SRT…" });
+    const words = srtToWords(lyricsText);
+    if (!words.length) throw new Error("Could not parse SRT");
+    onProgress?.({ progress: 1, status: "Done" });
+    return {
+      words,
+      srt: lyricsText,
+      method: "srt-paste",
+      provider: "srt",
+      firstAt: words[0].start,
+      note: `Loaded ${parseSrt(lyricsText).length} SRT cues → ${words.length} words.`,
+      lyrics: cuesToLyrics(lyricsText),
+    };
+  }
+
+  const refWords = tokenizeLyricWords(lyricsText);
+  if (!refWords.length) throw new Error("Paste lyrics or SRT first");
+  if (!file) throw new Error("Upload a song first");
+
+  // Try server SRT transcription
+  try {
+    const cap = await transcribeToSrt(file, {
+      onProgress,
+      signal,
+      prompt: lyricsText,
+    });
+    throwIfAborted(signal);
+
+    onProgress?.({ progress: 0.92, status: "Aligning your lyrics to SRT times…" });
+    await yieldToUi();
+
+    const match = alignmentMatchRate(refWords, cap.words);
+    const aligned = alignLyricsToAsr(refWords, cap.words, {
+      duration: durationHint || cap.words.at(-1)?.end || 0,
+    });
+
+    if (aligned.length && match >= 0.1) {
+      return {
+        words: aligned,
+        srt: wordsToSrt(aligned),
+        method: "srt+align",
+        provider: cap.provider,
+        match,
+        firstAt: aligned[0].start,
+        note: `SRT from ${cap.provider}, aligned your lyrics (match ~${Math.round(match * 100)}%).`,
+        lyrics: lyricsText,
+      };
+    }
+
+    // Use ASR/SRT words directly if alignment weak but we have captions
+    if (cap.words.length) {
+      return {
+        words: cap.words,
+        srt: cap.srt,
+        method: "srt-direct",
+        provider: cap.provider,
+        match,
+        firstAt: cap.words[0].start,
+        note: `Using transcribed SRT from ${cap.provider} (your text didn't match closely — edit lyrics if needed).`,
+        lyrics: cap.lyrics || lyricsText,
+      };
+    }
+  } catch (err) {
+    if (err?.name === "AbortError") throw err;
+    console.warn("[karaoki] SRT sync failed", err);
+    onProgress?.({
+      progress: 0.4,
+      status: `Caption API failed (${short(err)}) — energy sync…`,
+    });
+  }
+
+  // Energy fallback
+  const energy = await energySyncLyrics(file, refWords, {
+    onProgress,
+    signal,
+    durationHint,
+  });
+  return {
+    words: energy.words,
+    srt: wordsToSrt(energy.words),
+    method: "energy",
+    provider: "energy",
+    firstAt: energy.firstAt,
+    note: "Timed from audio energy. For better sync, upload an .srt from a free tool.",
+    lyrics: lyricsText,
+  };
+}
+
+/**
+ * Apply an uploaded SRT/VTT file.
+ * @param {File} file
+ */
+export async function loadSrtFile(file) {
+  const text = await file.text();
+  const words = srtToWords(text);
+  if (!words.length) throw new Error("No cues found in SRT/VTT file");
+  return {
+    words,
+    srt: text,
+    lyrics: cuesToLyrics(text),
+    firstAt: words[0].start,
+    note: `Imported ${parseSrt(text).length} caption cues.`,
+  };
+}
+
+function cuesToLyrics(srt) {
+  return parseSrt(srt)
+    .map((c) => c.text)
+    .join("\n");
+}
+
+function wordsToLines(words) {
+  const lines = [];
+  let buf = [];
+  for (let i = 0; i < words.length; i++) {
+    buf.push(words[i].text);
+    if (buf.length >= 8 || i === words.length - 1) {
+      lines.push(buf.join(" "));
+      buf = [];
+    }
+  }
+  return lines.join("\n");
+}
+
 function yieldToUi() {
   return new Promise((r) => setTimeout(r, 0));
 }
-
 function throwIfAborted(signal) {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 }
-
 function short(err) {
-  return String(err?.message || err || "error").slice(0, 60);
+  return String(err?.message || err || "error").slice(0, 80);
 }

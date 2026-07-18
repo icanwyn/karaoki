@@ -1,3 +1,5 @@
+import { useRef } from "react";
+
 export default function LyricsEditor({
   lyrics,
   onChange,
@@ -6,18 +8,22 @@ export default function LyricsEditor({
   onClear,
   onAutoFromSong,
   onCancelAuto,
+  onLoadSrtFile,
+  onDownloadSrt,
   wordCount,
   timedCount,
-  hasDuration,
   hasAudio,
   autoBusy = false,
   autoProgress = 0,
   autoStatus = "",
+  hasSrt = false,
 }) {
+  const srtInputRef = useRef(null);
+
   return (
     <div className="panel-section">
       <div className="panel-header" style={{ padding: "0 0 10px", border: "none" }}>
-        <h2 className="panel-title">Lyrics</h2>
+        <h2 className="panel-title">Lyrics & captions</h2>
         <span className="chip">
           {timedCount > 0 ? `${timedCount} timed` : `${wordCount} words`}
         </span>
@@ -28,11 +34,11 @@ export default function LyricsEditor({
         className="btn btn-primary btn-block auto-lyrics-btn"
         onClick={onAutoFromSong}
         disabled={!hasAudio || autoBusy}
-        title="Server Whisper only — does not freeze the browser"
+        title="Compress audio and get free/server SRT captions with timestamps"
       >
         {autoBusy
           ? `Working… ${Math.round((autoProgress || 0) * 100)}%`
-          : "✦ Auto lyrics from song"}
+          : "✦ Generate captions (SRT)"}
       </button>
 
       {autoBusy && (
@@ -61,7 +67,14 @@ export default function LyricsEditor({
         className="lyrics-textarea"
         value={lyrics}
         onChange={(e) => onChange?.(e.target.value)}
-        placeholder={`Paste official lyrics here…\n\nThen click “Sync lyrics to audio”.\n\nThis stays responsive — no heavy on-device AI.`}
+        placeholder={`Paste official lyrics OR paste an SRT caption file…
+
+Example SRT:
+1
+00:00:12,000 --> 00:00:15,500
+Hello world this is karaoke
+
+Or plain lyrics, then Sync / Generate captions.`}
         spellCheck={false}
         disabled={autoBusy}
       />
@@ -72,9 +85,27 @@ export default function LyricsEditor({
           className="btn btn-sm btn-primary"
           onClick={onAutoTime}
           disabled={!lyrics.trim() || !hasAudio || autoBusy}
-          title="Recommended: align your lyrics using server Whisper or fast energy analysis"
+          title="Align pasted lyrics using SRT transcription (or parse if text is already SRT)"
         >
           Sync lyrics to audio
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={() => srtInputRef.current?.click()}
+          disabled={autoBusy}
+          title="Import timestamps from any free tool that exports SRT/VTT"
+        >
+          Upload SRT
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={onDownloadSrt}
+          disabled={!hasSrt && timedCount === 0}
+          title="Download current timings as SRT"
+        >
+          Download SRT
         </button>
         <button type="button" className="btn btn-sm" onClick={onParseLrc} disabled={autoBusy}>
           Parse LRC
@@ -89,11 +120,29 @@ export default function LyricsEditor({
         </button>
       </div>
 
+      <input
+        ref={srtInputRef}
+        type="file"
+        accept=".srt,.vtt,text/plain,text/vtt"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (f) onLoadSrtFile?.(f);
+        }}
+      />
+
       <p className="hint">
-        <strong>Recommended:</strong> paste official lyrics → <strong>Sync lyrics to audio</strong>.
-        Uses the server (or a fast energy map) — <em>not</em> in-browser Whisper, so the tab
-        should stay responsive. LRC files are still the most accurate. Refine with Global offset
-        or Tap Sync.
+        <strong>New approach — SRT captions (no browser freeze):</strong>
+        <br />
+        1. Upload song → <strong>Generate captions (SRT)</strong> (server Whisper → timestamps)
+        <br />
+        2. Or get free SRT elsewhere (CapCut, free Whisper apps, YouTube) →{" "}
+        <strong>Upload SRT</strong>
+        <br />
+        3. Or paste official lyrics → <strong>Sync lyrics to audio</strong>
+        <br />
+        Audio is compressed before upload (fits free serverless limits).
       </p>
     </div>
   );

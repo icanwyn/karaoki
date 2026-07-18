@@ -19,8 +19,8 @@ import {
 } from "./lib/storage.js";
 import { exportKaraokeVideo } from "./lib/videoExport.js";
 import { UNTAPPED_START } from "./lib/constants.js";
-import { syncLyricsToAudio } from "./lib/syncLyrics.js";
-import { energySyncLyrics } from "./lib/energySync.js";
+import { syncLyricsToAudio, transcribeToSrt, loadSrtFile } from "./lib/syncLyrics.js";
+import { wordsToSrt, looksLikeSrt, srtToWords } from "./lib/srt.js";
 
 function revokeIfBlob(url) {
   if (url && url.startsWith("blob:")) {
@@ -352,32 +352,56 @@ export default function App() {
     }
   }, [lyrics, wordList, duration]);
 
+  const resolveAudioFile = useCallback(async () => {
+    if (audioFile) return audioFile;
+    if (!audioUrl) return null;
+    try {
+      const res = await fetch(audioUrl);
+      const blob = await res.blob();
+      return new File([blob], "song.audio", { type: blob.type || "audio/mpeg" });
+    } catch {
+      return null;
+    }
+  }, [audioFile, audioUrl]);
+
   /**
-   * Sync pasted lyrics to the song.
-   * Does NOT run browser Whisper (that froze the page). Uses:
-   * 1) server Whisper API (network) + align your text
-   * 2) or fast energy-based timing (no ML)
+   * Sync: parse pasted SRT, or compress+transcribe to SRT, align user lyrics.
    */
   const handleAutoTime = useCallback(async () => {
-    if (!wordList.length) {
-      setExportError("Paste lyrics first.");
+    if (!lyrics.trim()) {
+      setExportError("Paste lyrics or an SRT caption file first.");
       return;
     }
 
-    let file = audioFile;
-    if (!file && audioUrl) {
+    // Pure SRT paste — no audio required
+    if (looksLikeSrt(lyrics)) {
       try {
-        const res = await fetch(audioUrl);
-        const blob = await res.blob();
-        file = new File([blob], "song.audio", { type: blob.type || "audio/mpeg" });
-      } catch {
-        /* ignore */
+        const words = srtToWords(lyrics);
+        if (!words.length) throw new Error("Could not parse SRT");
+        setTimedWords(words);
+        setOffsetMs(0);
+        setExportError("");
+        setExportMessage(
+          `✓ Parsed SRT → ${words.length} timed words. First at ${words[0].start.toFixed(1)}s.`
+        );
+        setStatus("play");
+        setMode("play");
+      } catch (err) {
+        setExportError(err?.message || "Invalid SRT");
       }
+      return;
     }
+
+    if (!wordList.length) {
+      setExportError("Paste lyrics or SRT first.");
+      return;
+    }
+
+    const file = await resolveAudioFile();
     if (!file) {
       if (duration) {
         setTimedWords(estimateTimings(wordList, duration));
-        setExportMessage("Even timing only — re-upload the song for real sync.");
+        setExportMessage("Even timing only — re-upload the song for SRT sync.");
         return;
       }
       setExportError("Upload a song first.");
@@ -391,7 +415,7 @@ export default function App() {
 
     setAutoBusy(true);
     setAutoProgress(0.05);
-    setAutoStatus("Syncing lyrics (page stays responsive)…");
+    setAutoStatus("SRT caption sync…");
     setExportError("");
     setExportMessage("");
     audioRef.current?.pause();
@@ -406,30 +430,29 @@ export default function App() {
         },
       });
 
+      if (result.lyrics && result.method === "srt-direct") {
+        setLyrics(result.lyrics);
+      }
       setTimedWords(result.words);
       setOffsetMs(0);
       setExportError("");
       setExportMessage(
-        `✓ Synced ${result.words.length} words via ${result.method}. ` +
-          `First highlight at ${(result.firstAt ?? result.words[0]?.start ?? 0).toFixed(1)}s. ` +
-          `${result.note || ""} Use Global offset or Tap Sync to refine.`
+        `✓ Synced ${result.words.length} words (${result.method} / ${result.provider}). ` +
+          `First at ${(result.firstAt ?? 0).toFixed(1)}s. ${result.note || ""}`
       );
       setStatus("play");
       setMode("play");
     } catch (err) {
-      console.error("[karaoki] sync lyrics failed", err);
-      if (err?.name === "AbortError") {
-        setExportMessage("Sync cancelled.");
-      } else {
-        setExportError(err?.message || "Could not sync lyrics");
-      }
+      console.error("[karaoki] sync failed", err);
+      if (err?.name === "AbortError") setExportMessage("Cancelled.");
+      else setExportError(err?.message || "Sync failed");
     } finally {
       setAutoBusy(false);
       setAutoProgress(0);
       setAutoStatus("");
       autoAbortRef.current = null;
     }
-  }, [wordList, duration, audioFile, audioUrl, autoBusy, lyrics]);
+  }, [wordList, duration, resolveAudioFile, autoBusy, lyrics]);
 
   const handleClearLyrics = useCallback(() => {
     setLyrics("");
@@ -444,7 +467,6 @@ export default function App() {
       setTimedWords([]);
       return;
     }
-    // Untapped sentinel — never matches playhead, so stage won't race
     setTimedWords(
       wordList.map((text) => ({
         text,
@@ -456,23 +478,10 @@ export default function App() {
     setExportMessage("Timings cleared — ready for Tap Sync.");
   }, [wordList]);
 
-  /**
-   * Auto lyrics: server Whisper only (never browser ML — that froze the tab).
-   * If server fails, tell user to paste lyrics + Sync (energy path).
-   */
+  /** Generate SRT captions from the song (server Whisper → SRT timestamps). */
   const handleAutoFromSong = useCallback(async () => {
     if (autoBusy) return;
-
-    let file = audioFile;
-    if (!file && audioUrl) {
-      try {
-        const res = await fetch(audioUrl);
-        const blob = await res.blob();
-        file = new File([blob], "song.audio", { type: blob.type || "audio/mpeg" });
-      } catch {
-        /* ignore */
-      }
-    }
+    const file = await resolveAudioFile();
     if (!file) {
       setExportError("Upload a song first.");
       return;
@@ -484,82 +493,40 @@ export default function App() {
 
     setAutoBusy(true);
     setAutoProgress(0.05);
-    setAutoStatus("Transcribing on server (no browser freeze)…");
+    setAutoStatus("Generating SRT captions…");
     setExportError("");
     setExportMessage("");
     setIsSyncing(false);
     audioRef.current?.pause();
 
     try {
-      // Reuse sync path: empty lyrics → server returns text; we set lyrics from result
-      // Call server via syncLyrics with placeholder that forces server ASR text
-      const form = new FormData();
-      form.append("file", file, file.name || "song.mp3");
-      setAutoProgress(0.15);
-      setAutoStatus("Server Whisper…");
+      const cap = await transcribeToSrt(file, {
+        signal: ac.signal,
+        prompt: lyrics,
+        onProgress: (p) => {
+          if (typeof p.progress === "number") setAutoProgress(p.progress);
+          if (p.status) setAutoStatus(p.status);
+        },
+      });
 
-      const ctrl = ac.signal;
-      const res = await fetch("/api/transcribe", { method: "POST", body: form, signal: ctrl });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(
-          data.message ||
-            data.error ||
-            "Server transcription failed. Paste official lyrics and use Sync lyrics to audio."
-        );
-      }
-
-      const asrWords = (data.words || [])
-        .map((w) => ({
-          text: String(w.text || w.word || "").trim(),
-          start: Number(w.start) || 0,
-          end: Number(w.end) || 0,
-        }))
-        .filter((w) => w.text);
-
-      let words = asrWords;
-      let lyricsText = data.lyrics || data.text || words.map((w) => w.text).join(" ");
-
-      if (!words.length && data.text) {
-        // Text only — energy-time it
-        setAutoStatus("Placing transcript with energy sync…");
-        const tokens = flattenWords(data.text);
-        const energy = await energySyncLyrics(file, tokens, {
-          signal: ac.signal,
-          durationHint: duration || 0,
-          onProgress: (p) => {
-            if (p.progress != null) setAutoProgress(0.5 + p.progress * 0.5);
-            if (p.status) setAutoStatus(p.status);
-          },
-        });
-        words = energy.words;
-        lyricsText = wordsToLyricsSafe(words);
-      }
-
-      if (!words.length) {
-        throw new Error(
-          "No lyrics detected. Paste official lyrics and click Sync lyrics to audio."
-        );
-      }
-
-      setLyrics(typeof lyricsText === "string" ? lyricsText : wordsToLyricsSafe(words));
-      setTimedWords(words);
+      setLyrics(cap.lyrics || cap.text || "");
+      setTimedWords(cap.words);
       setOffsetMs(0);
       setExportError("");
       setExportMessage(
-        `✓ Transcribed ${words.length} words via server Whisper. ` +
-          `First at ${words[0].start.toFixed(1)}s. ` +
-          `For accurate text, paste official lyrics and Sync lyrics to audio.`
+        `✓ SRT from ${cap.provider}: ${cap.words.length} words, first at ${cap.words[0].start.toFixed(1)}s. ` +
+          (cap.truncated ? "Long track was trimmed for upload limits. " : "") +
+          "You can Download SRT or edit lyrics and re-sync."
       );
       setStatus("play");
       setMode("play");
     } catch (err) {
-      console.error("[karaoki] auto lyrics failed", err);
-      if (err?.name === "AbortError") {
-        setExportMessage("Cancelled.");
-      } else {
+      console.error("[karaoki] caption failed", err);
+      if (err?.name === "AbortError") setExportMessage("Cancelled.");
+      else {
         setExportError(
-          `${err?.message || "Auto lyrics failed"} — paste lyrics and use Sync (energy), no freeze.`
+          `${err?.message || "Caption API failed"}. ` +
+            "Workaround: create free SRT (CapCut / free Whisper app) → Upload SRT."
         );
       }
     } finally {
@@ -568,7 +535,39 @@ export default function App() {
       setAutoStatus("");
       autoAbortRef.current = null;
     }
-  }, [audioFile, audioUrl, autoBusy, duration]);
+  }, [resolveAudioFile, autoBusy, lyrics]);
+
+  const handleLoadSrtFile = useCallback(async (file) => {
+    try {
+      const result = await loadSrtFile(file);
+      setLyrics(result.lyrics);
+      setTimedWords(result.words);
+      setOffsetMs(0);
+      setExportError("");
+      setExportMessage(`✓ ${result.note}`);
+      setStatus("play");
+      setMode("play");
+    } catch (err) {
+      setExportError(err?.message || "Failed to load SRT");
+    }
+  }, []);
+
+  const handleDownloadSrt = useCallback(() => {
+    const words = timedWords.filter((w) => w.start < UNTAPPED_START / 2);
+    if (!words.length) {
+      setExportError("No timed words to export as SRT.");
+      return;
+    }
+    const srt = looksLikeSrt(lyrics) ? lyrics : wordsToSrt(words);
+    const blob = new Blob([srt], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(projectTitle || "karaoki").replace(/[^\w\-]+/g, "_")}.srt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setExportMessage("SRT downloaded.");
+  }, [timedWords, lyrics, projectTitle]);
 
   const handleCancelAuto = useCallback(() => {
     autoAbortRef.current?.abort();
@@ -921,6 +920,8 @@ export default function App() {
               onClear={handleClearLyrics}
               onAutoFromSong={handleAutoFromSong}
               onCancelAuto={handleCancelAuto}
+              onLoadSrtFile={handleLoadSrtFile}
+              onDownloadSrt={handleDownloadSrt}
               wordCount={wordList.length}
               timedCount={timedWords.filter((w) => w.start < UNTAPPED_START / 2).length}
               hasDuration={duration > 0}
@@ -928,6 +929,7 @@ export default function App() {
               autoBusy={autoBusy}
               autoProgress={autoProgress}
               autoStatus={autoStatus}
+              hasSrt={looksLikeSrt(lyrics)}
             />
 
             <SyncToolbar

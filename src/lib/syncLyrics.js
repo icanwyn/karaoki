@@ -4,9 +4,16 @@
  */
 
 import { compressAudioForUpload } from "./compressAudio.js";
-import { srtToWords, wordsToSrt, looksLikeSrt, parseSrt } from "./srt.js";
+import {
+  srtToWords,
+  wordsToSrt,
+  looksLikeSrt,
+  parseSrt,
+  refineWordsWithEnergy,
+} from "./srt.js";
 import { alignLyricsToAsr, alignmentMatchRate, tokenizeLyricWords } from "./alignLyrics.js";
 import { energySyncLyrics } from "./energySync.js";
+import { decodeMono16k } from "./audioAlign.js";
 
 /**
  * Transcribe song → SRT + timed words (server only).
@@ -193,19 +200,49 @@ export async function syncLyricsToAudio(file, lyricsText, opts = {}) {
 
 /**
  * Apply an uploaded SRT/VTT file.
- * @param {File} file
+ * If song audio is provided, refine in-cue word timing with energy so
+ * highlights follow the music instead of equal clock ticks.
+ *
+ * @param {File} file - .srt/.vtt
+ * @param {File|Blob|null} [audioFile]
  */
-export async function loadSrtFile(file) {
+export async function loadSrtFile(file, audioFile = null) {
   const text = await file.text();
-  const words = srtToWords(text);
+  let words = srtToWords(text);
   if (!words.length) throw new Error("No cues found in SRT/VTT file");
+
+  let note = `Imported ${parseSrt(text).length} caption lines (weighted word flow).`;
+  if (audioFile) {
+    try {
+      const decoded = await decodeMono16k(audioFile);
+      words = refineWordsWithEnergy(words, decoded.samples, decoded.sampleRate);
+      note += " Refined word timing to audio energy inside each line.";
+    } catch (err) {
+      console.warn("[karaoki] energy refine skipped", err);
+      note += " (Audio refine skipped — using weighted SRT split.)";
+    }
+  } else {
+    note += " Upload the song too for music-flow refine inside each line.";
+  }
+
   return {
     words,
     srt: text,
     lyrics: cuesToLyrics(text),
     firstAt: words[0].start,
-    note: `Imported ${parseSrt(text).length} caption cues.`,
+    note,
   };
+}
+
+/**
+ * Re-apply energy flow to existing timed words (e.g. after offset tweak or re-import).
+ * @param {import('./srt.js').TimedWord[]} words
+ * @param {File|Blob} audioFile
+ */
+export async function refineExistingWithAudio(words, audioFile) {
+  if (!words?.length || !audioFile) return words;
+  const decoded = await decodeMono16k(audioFile);
+  return refineWordsWithEnergy(words, decoded.samples, decoded.sampleRate);
 }
 
 function cuesToLyrics(srt) {

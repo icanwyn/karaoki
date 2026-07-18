@@ -19,7 +19,12 @@ import {
 } from "./lib/storage.js";
 import { exportKaraokeVideo } from "./lib/videoExport.js";
 import { UNTAPPED_START } from "./lib/constants.js";
-import { syncLyricsToAudio, transcribeToSrt, loadSrtFile } from "./lib/syncLyrics.js";
+import {
+  syncLyricsToAudio,
+  transcribeToSrt,
+  loadSrtFile,
+  refineExistingWithAudio,
+} from "./lib/syncLyrics.js";
 import { wordsToSrt, looksLikeSrt, srtToWords } from "./lib/srt.js";
 
 function revokeIfBlob(url) {
@@ -373,21 +378,32 @@ export default function App() {
       return;
     }
 
-    // Pure SRT paste — no audio required
+    // Pure SRT paste — weighted words; refine with audio energy if song is loaded
     if (looksLikeSrt(lyrics)) {
       try {
-        const words = srtToWords(lyrics);
+        setAutoBusy(true);
+        setAutoStatus("Parsing SRT…");
+        let words = srtToWords(lyrics);
         if (!words.length) throw new Error("Could not parse SRT");
+        const song = await resolveAudioFile();
+        if (song) {
+          setAutoStatus("Refining word flow to the music…");
+          words = await refineExistingWithAudio(words, song);
+        }
         setTimedWords(words);
         setOffsetMs(0);
         setExportError("");
         setExportMessage(
-          `✓ Parsed SRT → ${words.length} timed words. First at ${words[0].start.toFixed(1)}s.`
+          `✓ SRT → ${words.length} words (musical in-line timing). First at ${words[0].start.toFixed(1)}s.` +
+            (song ? " Energy-refined to audio." : " Upload the song for tighter flow.")
         );
         setStatus("play");
         setMode("play");
       } catch (err) {
         setExportError(err?.message || "Invalid SRT");
+      } finally {
+        setAutoBusy(false);
+        setAutoStatus("");
       }
       return;
     }
@@ -537,20 +553,33 @@ export default function App() {
     }
   }, [resolveAudioFile, autoBusy, lyrics]);
 
-  const handleLoadSrtFile = useCallback(async (file) => {
-    try {
-      const result = await loadSrtFile(file);
-      setLyrics(result.lyrics);
-      setTimedWords(result.words);
-      setOffsetMs(0);
-      setExportError("");
-      setExportMessage(`✓ ${result.note}`);
-      setStatus("play");
-      setMode("play");
-    } catch (err) {
-      setExportError(err?.message || "Failed to load SRT");
-    }
-  }, []);
+  const handleLoadSrtFile = useCallback(
+    async (file) => {
+      try {
+        setAutoBusy(true);
+        setAutoStatus("Loading SRT + matching word flow to audio…");
+        setAutoProgress(0.2);
+        const song = await resolveAudioFile();
+        const result = await loadSrtFile(file, song);
+        setLyrics(result.lyrics);
+        setTimedWords(result.words);
+        setOffsetMs(0);
+        setExportError("");
+        setExportMessage(
+          `✓ ${result.note} Use Global offset if the whole track is early/late.`
+        );
+        setStatus("play");
+        setMode("play");
+      } catch (err) {
+        setExportError(err?.message || "Failed to load SRT");
+      } finally {
+        setAutoBusy(false);
+        setAutoProgress(0);
+        setAutoStatus("");
+      }
+    },
+    [resolveAudioFile]
+  );
 
   const handleDownloadSrt = useCallback(() => {
     const words = timedWords.filter((w) => w.start < UNTAPPED_START / 2);

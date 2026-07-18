@@ -269,6 +269,20 @@ export function indexForTime(words, t) {
 export function groupIntoLines(words, rawLyrics) {
   if (!words?.length) return [];
 
+  // Prefer SRT cue lines (word.line) — matches musical phrases, not fixed width
+  if (words.some((w) => w.line != null)) {
+    /** @type {Map<number, { words: typeof words, startIndex: number }>} */
+    const map = new Map();
+    words.forEach((w, i) => {
+      const L = w.line ?? 0;
+      if (!map.has(L)) map.set(L, { words: [], startIndex: i });
+      map.get(L).words.push(w);
+    });
+    return [...map.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, g]) => g);
+  }
+
   if (rawLyrics) {
     const lines = tokenizeLines(rawLyrics);
     if (lines.length) {

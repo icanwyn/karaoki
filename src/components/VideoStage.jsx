@@ -55,6 +55,15 @@ const VideoStage = forwardRef(function VideoStage(
   const lineIdx = lineIndexForWord(lines, focusIndex);
   const activeLine = lines[lineIdx];
 
+  // 0–1 progress through the active word (smooth karaoke fill)
+  const wordProgress = useMemo(() => {
+    if (isSyncing || activeIndex < 0 || !words?.[activeIndex]) return 0;
+    const w = words[activeIndex];
+    const span = Math.max(0.05, (w.end ?? w.start + 0.3) - w.start);
+    const t = currentTime || 0;
+    return Math.max(0, Math.min(1, (t - w.start) / span));
+  }, [words, activeIndex, currentTime, isSyncing]);
+
   const bgStyle = imageUrl
     ? { backgroundImage: `url(${imageUrl})` }
     : { backgroundImage: stockBackground(stockImageId) };
@@ -96,6 +105,7 @@ const VideoStage = forwardRef(function VideoStage(
             {activeLine.words.map((w, i) => {
               const gi = activeLine.startIndex + i;
               let cls = "kw future";
+              let fill = 0;
               if (isSyncing) {
                 if (gi < syncIndex) cls = "kw past";
                 else if (gi === syncIndex) cls = "kw next";
@@ -104,11 +114,24 @@ const VideoStage = forwardRef(function VideoStage(
                 cls = "kw future";
               } else if (gi < activeIndex) {
                 cls = "kw past";
+                fill = 1;
               } else if (gi === activeIndex) {
                 cls = "kw active";
+                fill = wordProgress;
               }
               return (
-                <span key={`w-${gi}`} className={cls}>
+                <span
+                  key={`w-${gi}`}
+                  className={cls}
+                  style={
+                    cls === "kw active"
+                      ? {
+                          // progressive fill left→right through the active word
+                          backgroundImage: `linear-gradient(90deg, rgba(255,45,149,0.35) ${fill * 100}%, transparent ${fill * 100}%)`,
+                        }
+                      : undefined
+                  }
+                >
                   {w.text}
                 </span>
               );

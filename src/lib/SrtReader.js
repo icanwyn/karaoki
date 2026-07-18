@@ -109,83 +109,145 @@ export class SrtReader {
   }
 
   /**
-   * Snapshot for the karaoke UI at time t.
+   * Build word highlight states for a cue at time t.
+   * @param {SrtCue} cue
    * @param {number} t
+   * @param {'active'|'upcoming'} role
    */
-  snapshot(t) {
-    const idx = this.cueIndexAt(t);
-    const cue = idx >= 0 ? this.cues[idx] : null;
-    const prev = idx > 0 ? this.cues[idx - 1] : null;
-    const next =
-      idx >= 0 && idx + 1 < this.cues.length
-        ? this.cues[idx + 1]
-        : idx < 0 && this.cues[0] && t < this.cues[0].start
-          ? this.cues[0]
-          : null;
+  wordStatesForCue(cue, t, role = "active") {
+    /** @type {{ text: string, state: 'past'|'active'|'future', fill: number }[]} */
+    const wordStates = [];
+    if (!cue?.words?.length) {
+      return {
+        wordStates: [{ text: cue?.text || "", state: role === "upcoming" ? "future" : "active", fill: 0 }],
+        wordIndex: -1,
+        wordProgress: 0,
+        cueProgress: 0,
+      };
+    }
+
+    // Before music hits this cue: all future (but line still visible)
+    if (t < cue.start) {
+      for (const w of cue.words) {
+        wordStates.push({ text: w.text, state: "future", fill: 0 });
+      }
+      return { wordStates, wordIndex: -1, wordProgress: 0, cueProgress: 0 };
+    }
 
     let wordIndex = -1;
     let wordProgress = 0;
-    /** @type {{ text: string, state: 'past'|'active'|'future', fill: number }[]} */
-    const wordStates = [];
-
-    if (cue?.words?.length) {
-      for (let i = 0; i < cue.words.length; i++) {
-        const w = cue.words[i];
-        if (t >= w.start && t < w.end + 0.02) {
+    for (let i = 0; i < cue.words.length; i++) {
+      const w = cue.words[i];
+      if (t >= w.start && t < w.end + 0.02) {
+        wordIndex = i;
+        const span = Math.max(0.04, w.end - w.start);
+        wordProgress = Math.max(0, Math.min(1, (t - w.start) / span));
+      }
+    }
+    if (wordIndex < 0 && t >= cue.start) {
+      for (let i = cue.words.length - 1; i >= 0; i--) {
+        if (t >= cue.words[i].start) {
           wordIndex = i;
-          const span = Math.max(0.04, w.end - w.start);
-          wordProgress = Math.max(0, Math.min(1, (t - w.start) / span));
+          wordProgress = t >= cue.words[i].end ? 1 : 0;
+          break;
         }
-      }
-      // if between words inside cue, keep last past word
-      if (wordIndex < 0 && t >= cue.start && t <= cue.end) {
-        for (let i = cue.words.length - 1; i >= 0; i--) {
-          if (t >= cue.words[i].start) {
-            wordIndex = i;
-            wordProgress = 1;
-            break;
-          }
-        }
-      }
-
-      for (let i = 0; i < cue.words.length; i++) {
-        let state = "future";
-        let fill = 0;
-        if (wordIndex < 0) {
-          state = t >= cue.end ? "past" : "future";
-        } else if (i < wordIndex) {
-          state = "past";
-          fill = 1;
-        } else if (i === wordIndex) {
-          state = "active";
-          fill = wordProgress;
-        }
-        wordStates.push({ text: cue.words[i].text, state, fill });
       }
     }
 
-    // Whole-cue progress 0–1 (for bar under line)
-    let cueProgress = 0;
-    if (cue) {
-      const span = Math.max(0.05, cue.end - cue.start);
-      cueProgress = Math.max(0, Math.min(1, (t - cue.start) / span));
+    for (let i = 0; i < cue.words.length; i++) {
+      let state = "future";
+      let fill = 0;
+      if (role === "upcoming") {
+        state = "future";
+      } else if (wordIndex < 0) {
+        state = t >= cue.end ? "past" : "future";
+      } else if (i < wordIndex) {
+        state = "past";
+        fill = 1;
+      } else if (i === wordIndex) {
+        state = "active";
+        fill = wordProgress;
+      }
+      wordStates.push({ text: cue.words[i].text, state, fill });
     }
+
+    const span = Math.max(0.05, cue.end - cue.start);
+    const cueProgress = Math.max(0, Math.min(1, (t - cue.start) / span));
+    return { wordStates, wordIndex, wordProgress, cueProgress };
+  }
+
+  /**
+   * Snapshot for dual-line karaoke UI.
+   * - From music start (t≈0): show first line + second line
+   * - During playback: current line + next line
+   * @param {number} t
+   */
+  snapshot(t) {
+    const cues = this.cues;
+    if (!cues.length) {
+      return {
+        time: t,
+        cueIndex: -1,
+        lineA: null,
+        lineB: null,
+        waitingForFirst: false,
+        secondsToFirst: 0,
+      };
+    }
+
+    let idx = this.cueIndexAt(t);
+
+    // Show first line as soon as music starts (not only when first timestamp hits)
+    if (idx < 0 && t < cues[0].start) {
+      idx = 0;
+    }
+    // In gaps between cues, hold the last finished cue as line A until next starts
+    if (idx < 0 && t >= cues[0].start) {
+      for (let i = cues.length - 1; i >= 0; i--) {
+        if (t >= cues[i].start) {
+          idx = i;
+          break;
+        }
+      }
+    }
+
+    const lineA = idx >= 0 ? cues[idx] : cues[0];
+    const lineB =
+      idx >= 0 && idx + 1 < cues.length
+        ? cues[idx + 1]
+        : idx < 0 && cues.length > 1
+          ? cues[1]
+          : null;
+
+    const a = this.wordStatesForCue(lineA, t, "active");
+    const b = lineB
+      ? this.wordStatesForCue(lineB, t, "upcoming")
+      : null;
 
     return {
       time: t,
       cueIndex: idx,
-      cue,
-      prev,
-      next,
-      wordIndex,
-      wordProgress,
-      wordStates,
-      cueProgress,
-      waitingForFirst: this.cues.length > 0 && t < this.cues[0].start,
-      secondsToFirst:
-        this.cues.length > 0 && t < this.cues[0].start
-          ? this.cues[0].start - t
-          : 0,
+      cue: lineA,
+      next: lineB,
+      prev: idx > 0 ? cues[idx - 1] : null,
+      lineA: {
+        cue: lineA,
+        ...a,
+        role: t < lineA.start ? "upcoming" : "active",
+      },
+      lineB: lineB
+        ? {
+            cue: lineB,
+            ...b,
+            role: "upcoming",
+          }
+        : null,
+      wordIndex: a.wordIndex,
+      wordProgress: a.wordProgress,
+      wordStates: a.wordStates,
+      cueProgress: a.cueProgress,
+      waitingForFirst: false,
+      secondsToFirst: t < cues[0].start ? cues[0].start - t : 0,
     };
   }
 

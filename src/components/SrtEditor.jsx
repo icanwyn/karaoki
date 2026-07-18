@@ -81,20 +81,16 @@ export default function SrtEditor({
         </button>
         <button
           type="button"
-          className="btn btn-sm btn-primary"
+          className="btn btn-sm"
           onClick={() => {
             reader.restructureByCapital();
             commit(reader);
           }}
-          title="Start a new line at every Capitalized word"
+          title="Optional: start a new line at every Capitalized word (may change feel)"
         >
           Split on Capitals
         </button>
       </div>
-      <p className="hint" style={{ margin: 0 }}>
-        Free SRT tools often glue sentences. <strong>Split on Capitals</strong> makes each
-        Capitalized word start a new line (keeps word times).
-      </p>
 
       <ul className="srt-editor-list">
         {reader.cues.map((cue, i) => (

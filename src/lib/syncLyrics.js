@@ -203,15 +203,13 @@ export async function loadSrtFile(file, audioFile = null) {
   const reader = SrtReader.parse(text);
   if (reader.isEmpty) throw new Error("No cues found in SRT/VTT file");
 
-  // Always split so Capitalized words start new lines (fixes glued sentences)
-  reader.restructureByCapital();
-
-  let note = `Loaded ${reader.length} lines (split on Capital words).`;
+  // Keep original SRT line timings (capital-split is optional in Edit SRT)
+  let note = `Loaded ${reader.length} lines.`;
   if (audioFile) {
     try {
       const decoded = await decodeMono16k(audioFile);
       reader.refineWithEnergy(decoded.samples, decoded.sampleRate);
-      note += " Timing refined to audio.";
+      note += " Word flow refined to audio.";
     } catch (err) {
       console.warn("[karaoki] energy refine skipped", err);
     }

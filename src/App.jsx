@@ -6,6 +6,8 @@ import KaraokePlayer from "./components/KaraokePlayer.jsx";
 import VideoStage from "./components/VideoStage.jsx";
 import SrtReaderView from "./components/SrtReaderView.jsx";
 import SrtEditor from "./components/SrtEditor.jsx";
+import EffectsPicker from "./components/EffectsPicker.jsx";
+import FallingEffects from "./components/FallingEffects.jsx";
 import ExportPanel from "./components/ExportPanel.jsx";
 import { SrtReader } from "./lib/SrtReader.js";
 import {
@@ -148,6 +150,7 @@ export default function App() {
   /** @type {[import('./lib/SrtReader.js').SrtReader|null, Function]} */
   const [srtReader, setSrtReader] = useState(null);
   const [showSrtEditor, setShowSrtEditor] = useState(false);
+  const [stageEffect, setStageEffect] = useState("none");
   const [status, setStatus] = useState("edit");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -769,6 +772,7 @@ export default function App() {
               timedCount={timedWords.filter((w) => w.start < UNTAPPED_START / 2).length}
               hasReader={Boolean(srtReader && !srtReader.isEmpty)}
             />
+            <EffectsPicker value={stageEffect} onChange={setStageEffect} />
             <SyncToolbar
               isSyncing={isSyncing}
               offsetMs={offsetMs}
@@ -806,18 +810,22 @@ export default function App() {
                 offsetSec={offsetSec}
                 imageUrl={imageUrl}
                 stockBg={stockBackground(stockImageId)}
+                effect={stageEffect}
               />
             ) : (
-              <VideoStage
-                ref={stageRef}
-                imageUrl={imageUrl}
-                stockImageId={stockImageId}
-                words={displayWords}
-                lyrics={lyrics}
-                currentTime={currentTime}
-                isSyncing={isSyncing}
-                syncIndex={syncIndex}
-              />
+              <div className="stage-with-fx">
+                <VideoStage
+                  ref={stageRef}
+                  imageUrl={imageUrl}
+                  stockImageId={stockImageId}
+                  words={displayWords}
+                  lyrics={lyrics}
+                  currentTime={currentTime}
+                  isSyncing={isSyncing}
+                  syncIndex={syncIndex}
+                />
+                <FallingEffects effect={stageEffect} />
+              </div>
             )}
             <KaraokePlayer
               isPlaying={isPlaying}

@@ -1,19 +1,13 @@
 import { useRef } from "react";
 
-/** Minimal caption tools — glass studio aesthetic */
+/** Minimal caption tools — SRT only (no Whisper). */
 export default function LyricsEditor({
-  onAutoFromSong,
-  onCancelAuto,
   onLoadSrtFile,
   onDownloadSrt,
   onOpenEditor,
   onClear,
   timedCount,
-  hasAudio,
   hasReader,
-  autoBusy = false,
-  autoProgress = 0,
-  autoStatus = "",
 }) {
   const srtInputRef = useRef(null);
 
@@ -24,43 +18,13 @@ export default function LyricsEditor({
         {timedCount > 0 && <span className="chip">{timedCount} words</span>}
       </div>
 
-      <div className="stack-actions">
-        <button
-          type="button"
-          className="btn btn-primary btn-block"
-          onClick={() => srtInputRef.current?.click()}
-          disabled={autoBusy}
-        >
-          Upload SRT
-        </button>
-        <button
-          type="button"
-          className="btn btn-block"
-          onClick={onAutoFromSong}
-          disabled={!hasAudio || autoBusy}
-        >
-          {autoBusy
-            ? `Working… ${Math.round((autoProgress || 0) * 100)}%`
-            : "Generate captions"}
-        </button>
-      </div>
-
-      {autoBusy && (
-        <div className="auto-progress" role="status">
-          <div className="auto-progress-bar">
-            <div
-              className="auto-progress-fill"
-              style={{ width: `${Math.round((autoProgress || 0) * 100)}%` }}
-            />
-          </div>
-          <p className="hint" style={{ margin: "6px 0 0" }}>
-            {autoStatus || "Working…"}
-          </p>
-          <button type="button" className="btn btn-sm btn-ghost" onClick={onCancelAuto}>
-            Cancel
-          </button>
-        </div>
-      )}
+      <button
+        type="button"
+        className="btn btn-primary btn-block"
+        onClick={() => srtInputRef.current?.click()}
+      >
+        Upload SRT
+      </button>
 
       {hasReader && (
         <div className="stack-actions" style={{ marginTop: 10 }}>

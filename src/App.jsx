@@ -22,13 +22,8 @@ import {
 } from "./lib/storage.js";
 import { exportKaraokeVideo } from "./lib/videoExport.js";
 import { UNTAPPED_START } from "./lib/constants.js";
-import {
-  syncLyricsToAudio,
-  transcribeToSrt,
-  loadSrtFile,
-  refineExistingWithAudio,
-} from "./lib/syncLyrics.js";
-import { wordsToSrt, looksLikeSrt } from "./lib/srt.js";
+import { loadSrtFile } from "./lib/syncLyrics.js";
+import { wordsToSrt } from "./lib/srt.js";
 import { decodeMono16k } from "./lib/audioAlign.js";
 
 function revokeIfBlob(url) {
@@ -170,15 +165,10 @@ export default function App() {
   const [exportMessage, setExportMessage] = useState("");
   const [shareMessage, setShareMessage] = useState("");
 
-  const [autoBusy, setAutoBusy] = useState(false);
-  const [autoProgress, setAutoProgress] = useState(0);
-  const [autoStatus, setAutoStatus] = useState("");
-
   const audioRef = useRef(null);
   const stageRef = useRef(null);
   const rafRef = useRef(0);
   const exportAbortRef = useRef(null);
-  const autoAbortRef = useRef(null);
   const isSyncingRef = useRef(false);
   const syncIndexRef = useRef(0);
   const syncBaseRef = useRef([]);
@@ -376,110 +366,6 @@ export default function App() {
     }
   }, [audioFile, audioUrl]);
 
-  /**
-   * Sync: parse pasted SRT, or compress+transcribe to SRT, align user lyrics.
-   */
-  const handleAutoTime = useCallback(async () => {
-    if (!lyrics.trim()) {
-      setExportError("Paste lyrics or an SRT caption file first.");
-      return;
-    }
-
-    // Pure SRT paste — custom SrtReader engine
-    if (looksLikeSrt(lyrics)) {
-      try {
-        setAutoBusy(true);
-        setAutoStatus("SrtReader parsing…");
-        const reader = SrtReader.parse(lyrics);
-        if (reader.isEmpty) throw new Error("Could not parse SRT");
-        const song = await resolveAudioFile();
-        if (song) {
-          setAutoStatus("Refining word flow to the music…");
-          const decoded = await decodeMono16k(song);
-          reader.refineWithEnergy(decoded.samples, decoded.sampleRate);
-        }
-        setSrtReader(reader);
-        setLyrics(reader.lyricsText);
-        setTimedWords(reader.words);
-        setOffsetMs(0);
-        setExportError("");
-        setExportMessage(
-          `✓ SrtReader: ${reader.length} cues · ${reader.words.length} words. First at ${reader.words[0].start.toFixed(1)}s.` +
-            (song ? " Energy-refined." : "")
-        );
-        setStatus("play");
-        setMode("play");
-      } catch (err) {
-        setExportError(err?.message || "Invalid SRT");
-      } finally {
-        setAutoBusy(false);
-        setAutoStatus("");
-      }
-      return;
-    }
-
-    if (!wordList.length) {
-      setExportError("Paste lyrics or SRT first.");
-      return;
-    }
-
-    const file = await resolveAudioFile();
-    if (!file) {
-      if (duration) {
-        setTimedWords(estimateTimings(wordList, duration));
-        setExportMessage("Even timing only — re-upload the song for SRT sync.");
-        return;
-      }
-      setExportError("Upload a song first.");
-      return;
-    }
-
-    if (autoBusy) return;
-    autoAbortRef.current?.abort();
-    const ac = new AbortController();
-    autoAbortRef.current = ac;
-
-    setAutoBusy(true);
-    setAutoProgress(0.05);
-    setAutoStatus("SRT caption sync…");
-    setExportError("");
-    setExportMessage("");
-    audioRef.current?.pause();
-
-    try {
-      const result = await syncLyricsToAudio(file, lyrics, {
-        signal: ac.signal,
-        durationHint: duration || 0,
-        onProgress: (p) => {
-          if (typeof p.progress === "number") setAutoProgress(p.progress);
-          if (p.status) setAutoStatus(p.status);
-        },
-      });
-
-      if (result.lyrics && result.method === "srt-direct") {
-        setLyrics(result.lyrics);
-      }
-      setTimedWords(result.words);
-      setOffsetMs(0);
-      setExportError("");
-      setExportMessage(
-        `✓ Synced ${result.words.length} words (${result.method} / ${result.provider}). ` +
-          `First at ${(result.firstAt ?? 0).toFixed(1)}s. ${result.note || ""}`
-      );
-      setStatus("play");
-      setMode("play");
-    } catch (err) {
-      console.error("[karaoki] sync failed", err);
-      if (err?.name === "AbortError") setExportMessage("Cancelled.");
-      else setExportError(err?.message || "Sync failed");
-    } finally {
-      setAutoBusy(false);
-      setAutoProgress(0);
-      setAutoStatus("");
-      autoAbortRef.current = null;
-    }
-  }, [wordList, duration, resolveAudioFile, autoBusy, lyrics]);
-
   const handleClearLyrics = useCallback(() => {
     setLyrics("");
     setTimedWords([]);
@@ -519,97 +405,24 @@ export default function App() {
     setExportMessage("Timings cleared — ready for Tap Sync.");
   }, [wordList]);
 
-  /** Generate SRT captions from the song (server Whisper → SRT timestamps). */
-  const handleAutoFromSong = useCallback(async () => {
-    if (autoBusy) return;
-    const file = await resolveAudioFile();
-    if (!file) {
-      setExportError("Upload a song first.");
-      return;
-    }
-
-    autoAbortRef.current?.abort();
-    const ac = new AbortController();
-    autoAbortRef.current = ac;
-
-    setAutoBusy(true);
-    setAutoProgress(0.05);
-    setAutoStatus("Generating SRT captions…");
-    setExportError("");
-    setExportMessage("");
-    setIsSyncing(false);
-    audioRef.current?.pause();
-
-    try {
-      const cap = await transcribeToSrt(file, {
-        signal: ac.signal,
-        prompt: lyrics,
-        onProgress: (p) => {
-          if (typeof p.progress === "number") setAutoProgress(p.progress);
-          if (p.status) setAutoStatus(p.status);
-        },
-      });
-
-      const reader = cap.srt ? SrtReader.parse(cap.srt) : null;
-      if (reader && !reader.isEmpty) {
-        setSrtReader(reader);
-        setLyrics(reader.lyricsText);
-        setTimedWords(reader.words);
-      } else {
-        setSrtReader(null);
-        setLyrics(cap.lyrics || cap.text || "");
-        setTimedWords(cap.words);
-      }
-      setOffsetMs(0);
-      setExportError("");
-      setExportMessage(
-        `✓ SRT from ${cap.provider}: ${cap.words.length} words, first at ${cap.words[0].start.toFixed(1)}s. ` +
-          (cap.truncated ? "Long track was trimmed for upload limits. " : "") +
-          "Custom SrtReader is active — click cues to seek."
-      );
-      setStatus("play");
-      setMode("play");
-    } catch (err) {
-      console.error("[karaoki] caption failed", err);
-      if (err?.name === "AbortError") setExportMessage("Cancelled.");
-      else {
-        setExportError(
-          `${err?.message || "Caption API failed"}. ` +
-            "Workaround: create free SRT (CapCut / free Whisper app) → Upload SRT."
-        );
-      }
-    } finally {
-      setAutoBusy(false);
-      setAutoProgress(0);
-      setAutoStatus("");
-      autoAbortRef.current = null;
-    }
-  }, [resolveAudioFile, autoBusy, lyrics]);
-
   const handleLoadSrtFile = useCallback(
     async (file) => {
       try {
-        setAutoBusy(true);
-        setAutoStatus("Loading SRT + matching word flow to audio…");
-        setAutoProgress(0.2);
+        setExportError("");
+        setExportMessage("Loading SRT…");
         const song = await resolveAudioFile();
         const result = await loadSrtFile(file, song);
         if (result.reader) setSrtReader(result.reader);
         setLyrics(result.lyrics);
         setTimedWords(result.words);
         setOffsetMs(0);
-        setExportError("");
         setExportMessage(
-          `✓ ${result.note} Use Global offset if the whole track is early/late.`
+          `✓ ${result.note} Edit SRT to trim junk · Offset if early/late.`
         );
         setStatus("play");
         setMode("play");
       } catch (err) {
         setExportError(err?.message || "Failed to load SRT");
-      } finally {
-        setAutoBusy(false);
-        setAutoProgress(0);
-        setAutoStatus("");
       }
     },
     [resolveAudioFile]
@@ -651,10 +464,6 @@ export default function App() {
     URL.revokeObjectURL(url);
     setExportMessage("SRT downloaded.");
   }, [srtReader, timedWords, projectTitle, offsetSec]);
-
-  const handleCancelAuto = useCallback(() => {
-    autoAbortRef.current?.abort();
-  }, []);
 
   const handleStartSync = useCallback(async () => {
     const texts =
@@ -898,22 +707,9 @@ export default function App() {
       revokeIfBlob(audioUrl);
       revokeIfBlob(imageUrl);
       revokeIfBlob(downloadUrl);
-      autoAbortRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const statusTone =
-    status === "sync"
-      ? "sync"
-      : status === "export"
-        ? "export"
-        : status === "play"
-          ? "play"
-          : "";
-
-  const nextWord =
-    isSyncing && syncBaseWords[syncIndex] ? syncBaseWords[syncIndex].text : null;
 
   const downloadName = `${(projectTitle || "karaoki")
     .replace(/[^\w\-]+/g, "_")
@@ -945,7 +741,7 @@ export default function App() {
             type="button"
             className="btn btn-export"
             onClick={handleExport}
-            disabled={!canExport || exporting || autoBusy}
+            disabled={!canExport || exporting}
           >
             {exporting ? "Exporting…" : "Export"}
           </button>
@@ -967,17 +763,11 @@ export default function App() {
             />
             <LyricsEditor
               onClear={handleClearLyrics}
-              onAutoFromSong={handleAutoFromSong}
-              onCancelAuto={handleCancelAuto}
               onLoadSrtFile={handleLoadSrtFile}
               onDownloadSrt={handleDownloadSrt}
               onOpenEditor={() => setShowSrtEditor(true)}
               timedCount={timedWords.filter((w) => w.start < UNTAPPED_START / 2).length}
-              hasAudio={Boolean(audioFile || audioUrl)}
               hasReader={Boolean(srtReader && !srtReader.isEmpty)}
-              autoBusy={autoBusy}
-              autoProgress={autoProgress}
-              autoStatus={autoStatus}
             />
             <SyncToolbar
               isSyncing={isSyncing}
@@ -988,7 +778,6 @@ export default function App() {
               onTap={handleTap}
               hasAudio={Boolean(audioUrl)}
               hasWords={wordList.length > 0 || timedWords.length > 0}
-              disabled={autoBusy}
             />
             {(exportError || exportMessage || shareMessage || downloadUrl || exporting) && (
               <ExportPanel
@@ -1036,7 +825,7 @@ export default function App() {
               duration={duration}
               onTogglePlay={togglePlay}
               onSeek={handleSeek}
-              disabled={!audioUrl || autoBusy}
+              disabled={!audioUrl}
               activeWordIndex={activeWordIndex}
               totalWords={displayWords.length}
               seekDisabled={isSyncing}

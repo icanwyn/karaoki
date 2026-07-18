@@ -203,18 +203,18 @@ export async function loadSrtFile(file, audioFile = null) {
   const reader = SrtReader.parse(text);
   if (reader.isEmpty) throw new Error("No cues found in SRT/VTT file");
 
-  let note = `SrtReader loaded ${reader.length} cues.`;
+  // Always split so Capitalized words start new lines (fixes glued sentences)
+  reader.restructureByCapital();
+
+  let note = `Loaded ${reader.length} lines (split on Capital words).`;
   if (audioFile) {
     try {
       const decoded = await decodeMono16k(audioFile);
       reader.refineWithEnergy(decoded.samples, decoded.sampleRate);
-      note += " Word flow refined to audio energy per line.";
+      note += " Timing refined to audio.";
     } catch (err) {
       console.warn("[karaoki] energy refine skipped", err);
-      note += " (Audio refine skipped.)";
     }
-  } else {
-    note += " Upload the song for music-flow refine.";
   }
 
   return {

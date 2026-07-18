@@ -313,6 +313,69 @@ export class SrtReader {
     return this._reindex();
   }
 
+  /**
+   * Restructure so every Capitalized word starts a new line.
+   * Fixes free-generator SRTs that glue two sentences into one cue.
+   * Word timestamps are preserved; only line boundaries change.
+   *
+   * Example: "hello world This is fine" →
+   *   line1: "hello world"
+   *   line2: "This is fine"
+   *
+   * @param {{ keepSingleLetter?: boolean }} [opts]
+   *   keepSingleLetter: if false (default), single-letter caps like "I" still start a line.
+   */
+  restructureByCapital(opts = {}) {
+    const words = this.words.slice().sort((a, b) => a.start - b.start);
+    if (!words.length) return this;
+
+    /** @type {TimedWord[][]} */
+    const groups = [];
+    let current = [];
+
+    for (const w of words) {
+      const text = String(w.text || "").trim();
+      const startsCapital = startsWithCapital(text);
+
+      if (current.length > 0 && startsCapital) {
+        groups.push(current);
+        current = [{ ...w }];
+      } else {
+        current.push({ ...w });
+      }
+    }
+    if (current.length) groups.push(current);
+
+    this.cues = groups.map((group, i) => {
+      const start = group[0].start;
+      const end = Math.max(
+        group[group.length - 1].end,
+        start + 0.1
+      );
+      const text = group.map((g) => g.text).join(" ");
+      // Keep original word times (don't re-weight — preserves music flow)
+      const cueWords = group.map((g) => ({
+        text: g.text,
+        start: g.start,
+        end: g.end,
+        line: i,
+        cueIndex: i,
+      }));
+      return {
+        index: i + 1,
+        start,
+        end,
+        text,
+        lines: [text],
+        words: cueWords,
+      };
+    });
+
+    void opts;
+    this._words = null;
+    return this;
+  }
+
   /** Serialize to classic SRT. */
   toSrt() {
     let out = "";
@@ -594,6 +657,15 @@ function redistributeByEnergy(group, cueStart, cueEnd, samples, sampleRate, line
     line: lineIdx,
     cueIndex: lineIdx,
   }));
+}
+
+/** True if token begins with an uppercase letter (Unicode-aware enough for Latin). */
+export function startsWithCapital(text) {
+  const s = String(text || "").replace(/^["'“‘(\[]+/, "");
+  if (!s) return false;
+  const ch = s[0];
+  // Letter that is uppercase and not the same when lowercased
+  return /[A-ZÀ-ÖØ-Þ]/.test(ch) || (ch !== ch.toLowerCase() && ch === ch.toUpperCase() && /[^\d\W]/.test(ch));
 }
 
 export function parseTimestamp(ts) {

@@ -112,22 +112,32 @@ export class SrtReader {
    * Build word highlight states for a cue at time t.
    * @param {SrtCue} cue
    * @param {number} t
-   * @param {'active'|'upcoming'} role
+   * @param {'active'|'upcoming'|'done'} role
    */
   wordStatesForCue(cue, t, role = "active") {
     /** @type {{ text: string, state: 'past'|'active'|'future', fill: number }[]} */
     const wordStates = [];
     if (!cue?.words?.length) {
+      const fallback =
+        role === "done" ? "past" : role === "upcoming" ? "future" : "active";
       return {
-        wordStates: [{ text: cue?.text || "", state: role === "upcoming" ? "future" : "active", fill: 0 }],
+        wordStates: [{ text: cue?.text || "", state: fallback, fill: role === "done" ? 1 : 0 }],
         wordIndex: -1,
         wordProgress: 0,
         cueProgress: 0,
       };
     }
 
-    // Before music hits this cue: all future (but line still visible)
-    if (t < cue.start) {
+    // Completed line in the pair (top line after bottom is singing)
+    if (role === "done") {
+      for (const w of cue.words) {
+        wordStates.push({ text: w.text, state: "past", fill: 1 });
+      }
+      return { wordStates, wordIndex: cue.words.length - 1, wordProgress: 1, cueProgress: 1 };
+    }
+
+    // Before this cue's timestamps: all future (still visible)
+    if (t < cue.start || role === "upcoming") {
       for (const w of cue.words) {
         wordStates.push({ text: w.text, state: "future", fill: 0 });
       }
@@ -157,9 +167,7 @@ export class SrtReader {
     for (let i = 0; i < cue.words.length; i++) {
       let state = "future";
       let fill = 0;
-      if (role === "upcoming") {
-        state = "future";
-      } else if (wordIndex < 0) {
+      if (wordIndex < 0) {
         state = t >= cue.end ? "past" : "future";
       } else if (i < wordIndex) {
         state = "past";
@@ -177,9 +185,12 @@ export class SrtReader {
   }
 
   /**
-   * Snapshot for dual-line karaoke UI.
-   * - From music start (t≈0): show first line + second line
-   * - During playback: current line + next line
+   * Snapshot for dual-line karaoke UI (fixed top/bottom pair).
+   *
+   * Lines stay put: highlight top (cues 0,2,4…), then bottom (1,3,5…),
+   * then wrap to the next pair — bottom does NOT slide up to top.
+   *
+   * From music start: show first pair with top line ready.
    * @param {number} t
    */
   snapshot(t) {
@@ -197,11 +208,11 @@ export class SrtReader {
 
     let idx = this.cueIndexAt(t);
 
-    // Show first line as soon as music starts (not only when first timestamp hits)
+    // First pair visible as soon as music starts
     if (idx < 0 && t < cues[0].start) {
       idx = 0;
     }
-    // In gaps between cues, hold the last finished cue as line A until next starts
+    // Gaps: hold last reached cue
     if (idx < 0 && t >= cues[0].start) {
       for (let i = cues.length - 1; i >= 0; i--) {
         if (t >= cues[i].start) {
@@ -210,42 +221,53 @@ export class SrtReader {
         }
       }
     }
+    if (idx < 0) idx = 0;
 
-    const lineA = idx >= 0 ? cues[idx] : cues[0];
-    const lineB =
-      idx >= 0 && idx + 1 < cues.length
-        ? cues[idx + 1]
-        : idx < 0 && cues.length > 1
-          ? cues[1]
-          : null;
+    // Pair: (0,1) then (2,3) then (4,5)…
+    const pairStart = Math.floor(idx / 2) * 2;
+    const topCue = cues[pairStart];
+    const bottomCue = pairStart + 1 < cues.length ? cues[pairStart + 1] : null;
 
-    const a = this.wordStatesForCue(lineA, t, "active");
-    const b = lineB
-      ? this.wordStatesForCue(lineB, t, "upcoming")
+    // Which line in the pair is singing?
+    const topRole =
+      idx > pairStart ? "done" : idx === pairStart ? "active" : "upcoming";
+    const bottomRole =
+      !bottomCue
+        ? null
+        : idx > pairStart + 1
+          ? "done"
+          : idx === pairStart + 1
+            ? "active"
+            : "upcoming";
+
+    const a = this.wordStatesForCue(topCue, t, topRole);
+    const b = bottomCue
+      ? this.wordStatesForCue(bottomCue, t, bottomRole)
       : null;
 
     return {
       time: t,
       cueIndex: idx,
-      cue: lineA,
-      next: lineB,
-      prev: idx > 0 ? cues[idx - 1] : null,
+      pairStart,
+      cue: idx === pairStart ? topCue : bottomCue || topCue,
+      next: bottomCue,
+      prev: pairStart > 0 ? cues[pairStart - 1] : null,
       lineA: {
-        cue: lineA,
+        cue: topCue,
         ...a,
-        role: t < lineA.start ? "upcoming" : "active",
+        role: topRole,
       },
-      lineB: lineB
+      lineB: bottomCue
         ? {
-            cue: lineB,
+            cue: bottomCue,
             ...b,
-            role: "upcoming",
+            role: bottomRole,
           }
         : null,
-      wordIndex: a.wordIndex,
-      wordProgress: a.wordProgress,
-      wordStates: a.wordStates,
-      cueProgress: a.cueProgress,
+      wordIndex: (idx === pairStart ? a : b)?.wordIndex ?? -1,
+      wordProgress: (idx === pairStart ? a : b)?.wordProgress ?? 0,
+      wordStates: (idx === pairStart ? a : b)?.wordStates ?? [],
+      cueProgress: (idx === pairStart ? a : b)?.cueProgress ?? 0,
       waitingForFirst: false,
       secondsToFirst: t < cues[0].start ? cues[0].start - t : 0,
     };

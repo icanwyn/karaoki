@@ -211,22 +211,57 @@ body {
 .srt-reader-minimal .srt-reader-stage {
   position: relative;
   min-height: 360px;
+  /* Lyrics sit lower but without a huge empty footer */
+  align-items: flex-end;
 }
 
 .srt-reader-dual {
-  gap: 14px;
-  padding-bottom: 28px;
+  gap: 6px;
+  padding: 0 16px 10px;
+  width: 100%;
 }
 
-.srt-cue-upcoming {
-  opacity: 0.42;
-  transform: scale(0.94);
+.srt-cue-top,
+.srt-cue-bottom {
+  width: min(920px, 100%);
+  margin: 0 auto;
+  padding: 6px 12px;
+  border-radius: 12px;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
-.srt-cue-upcoming .srt-w {
-  color: rgba(255, 255, 255, 0.4);
-  text-shadow: none;
-  transform: none;
+.srt-cue-top.is-singing,
+.srt-cue-bottom.is-singing {
+  background: rgba(8, 4, 16, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.srt-cue-top.is-upcoming,
+.srt-cue-bottom.is-upcoming {
+  opacity: 0.45;
+}
+
+.srt-cue-top.is-done,
+.srt-cue-bottom.is-done {
+  opacity: 0.55;
+}
+
+.srt-cue-spacer {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  visibility: hidden;
+}
+
+/* Override older large padding */
+.srt-reader-minimal .srt-reader-main {
+  padding: 0 12px 8px;
+  gap: 4px;
+}
+
+.srt-reader-minimal .srt-words {
+  font-size: clamp(1.05rem, 2.3vw, 1.65rem);
+  gap: 0.22em 0.36em;
 }
 
 .falling-effects {

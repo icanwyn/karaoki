@@ -59,6 +59,22 @@ const PRESETS = {
     shape: "petal",
     spin: true,
   },
+  fireflies: {
+    count: 36,
+    speed: [-6, 6], // gentle float, mostly hover
+    drift: [-20, 20],
+    size: [1.2, 2.8],
+    alpha: [0.2, 0.9],
+    color: () => {
+      // warm yellow-green glow
+      const g = 200 + Math.random() * 40;
+      const r = 180 + Math.random() * 60;
+      return `rgba(${r},${g},90,`;
+    },
+    shape: "glow",
+    spin: false,
+    float: true,
+  },
 };
 
 export const EFFECT_OPTIONS = [
@@ -67,6 +83,7 @@ export const EFFECT_OPTIONS = [
   { id: "snow", label: "Snow" },
   { id: "rain", label: "Rain" },
   { id: "flowers", label: "Flowers" },
+  { id: "fireflies", label: "Fireflies" },
 ];
 
 function rand(a, b) {
@@ -76,7 +93,7 @@ function rand(a, b) {
 function makeParticle(w, h, cfg) {
   return {
     x: Math.random() * w,
-    y: Math.random() * h - h * 0.2,
+    y: Math.random() * h,
     vy: rand(cfg.speed[0], cfg.speed[1]),
     vx: rand(cfg.drift[0], cfg.drift[1]),
     r: rand(cfg.size[0], cfg.size[1]),
@@ -85,6 +102,8 @@ function makeParticle(w, h, cfg) {
     vr: cfg.spin ? rand(-0.8, 0.8) : 0,
     color: cfg.color(),
     phase: Math.random() * Math.PI * 2,
+    blink: Math.random() * Math.PI * 2,
+    float: !!cfg.float,
   };
 }
 
@@ -148,16 +167,27 @@ export default function FallingEffects({ effect = "none", className = "" }) {
 
       for (const p of particles) {
         p.phase += dt;
-        p.x += (p.vx + Math.sin(p.phase * 1.2) * 8) * dt;
-        p.y += p.vy * dt;
-        p.rot += p.vr * dt;
+        p.blink += dt * (p.float ? 2.2 : 1);
 
-        if (p.y > h + 20) {
-          p.y = -20;
-          p.x = Math.random() * w;
+        if (p.float) {
+          // Fireflies: slow drift + hover, wrap edges softly
+          p.x += (p.vx * 0.35 + Math.sin(p.phase * 0.9) * 14) * dt;
+          p.y += (p.vy * 0.35 + Math.cos(p.phase * 0.7) * 10) * dt;
+          if (p.x < -10) p.x = w + 10;
+          if (p.x > w + 10) p.x = -10;
+          if (p.y < -10) p.y = h + 10;
+          if (p.y > h + 10) p.y = -10;
+        } else {
+          p.x += (p.vx + Math.sin(p.phase * 1.2) * 8) * dt;
+          p.y += p.vy * dt;
+          p.rot += p.vr * dt;
+          if (p.y > h + 20) {
+            p.y = -20;
+            p.x = Math.random() * w;
+          }
+          if (p.x < -30) p.x = w + 20;
+          if (p.x > w + 30) p.x = -20;
         }
-        if (p.x < -30) p.x = w + 20;
-        if (p.x > w + 30) p.x = -20;
 
         if (cfg.shape === "streak") {
           ctx.strokeStyle = `${p.color}${p.a})`;
@@ -168,6 +198,22 @@ export default function FallingEffects({ effect = "none", className = "" }) {
           ctx.stroke();
         } else if (cfg.shape === "petal") {
           drawPetal(p);
+        } else if (cfg.shape === "glow") {
+          // Soft blinking glow (firefly)
+          const pulse = 0.35 + 0.65 * Math.max(0, Math.sin(p.blink));
+          const alpha = p.a * pulse;
+          const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 5);
+          g.addColorStop(0, `${p.color}${Math.min(1, alpha)})`);
+          g.addColorStop(0.35, `${p.color}${alpha * 0.45})`);
+          g.addColorStop(1, `${p.color}0)`);
+          ctx.beginPath();
+          ctx.fillStyle = g;
+          ctx.arc(p.x, p.y, p.r * 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.fillStyle = `${p.color}${Math.min(1, alpha + 0.15)})`;
+          ctx.arc(p.x, p.y, p.r * 0.7, 0, Math.PI * 2);
+          ctx.fill();
         } else {
           ctx.beginPath();
           ctx.fillStyle = `${p.color}${p.a})`;

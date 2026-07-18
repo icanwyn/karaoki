@@ -15,7 +15,7 @@ import {
   timingsLookValid,
 } from "./audioAlign.js";
 
-const FAR = 1e9;
+import { UNTAPPED_START as FAR } from "./constants.js";
 // base.en is more accurate than tiny for sung lyrics (still free, still local).
 // Fall back to tiny if base fails to load.
 const MODEL_CANDIDATES = [

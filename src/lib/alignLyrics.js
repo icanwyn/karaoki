@@ -72,9 +72,12 @@ export function alignLyricsToAsr(referenceWordsOrText, asrWords, opts = {}) {
     return evenly(refRaw, opts.duration || refRaw.length * 0.35);
   }
 
-  // Needleman–Wunsch
+  // Needleman–Wunsch (cap size — huge lyric sheets use greedy align instead of freezing UI)
   const n = ref.length;
   const m = asr.length;
+  if (n * m > 400_000) {
+    return greedyAlign(refRaw, asr, opts.duration);
+  }
   const MATCH = 2;
   const MISMATCH = -1;
   const GAP = -1;
@@ -219,6 +222,47 @@ function evenly(words, durationSec) {
     const start = lead + i * slot;
     return { text, start, end: start + Math.max(0.08, slot * 0.9) };
   });
+}
+
+/** Linear scan align for very long lyrics (O(n+m), no freeze). */
+function greedyAlign(refRaw, asr, duration) {
+  /** @type {TimedWord[]} */
+  const out = [];
+  let j = 0;
+  for (let i = 0; i < refRaw.length; i++) {
+    const norm = normalizeToken(refRaw[i]);
+    let found = -1;
+    const limit = Math.min(asr.length, j + 40);
+    for (let k = j; k < limit; k++) {
+      if (
+        asr[k].norm === norm ||
+        (norm.length > 2 &&
+          asr[k].norm.length > 2 &&
+          (asr[k].norm.startsWith(norm.slice(0, 3)) ||
+            norm.startsWith(asr[k].norm.slice(0, 3))))
+      ) {
+        found = k;
+        break;
+      }
+    }
+    if (found >= 0) {
+      out.push({
+        text: refRaw[i],
+        start: asr[found].start,
+        end: Math.max(asr[found].end, asr[found].start + 0.06),
+      });
+      j = found + 1;
+    } else {
+      const prev = out.length ? out[out.length - 1].end : asr[0]?.start || 0;
+      out.push({ text: refRaw[i], start: prev, end: prev + 0.2 });
+    }
+  }
+  for (let i = 1; i < out.length; i++) {
+    if (out[i].start < out[i - 1].end) out[i].start = out[i - 1].end;
+    if (out[i].end <= out[i].start) out[i].end = out[i].start + 0.08;
+  }
+  void duration;
+  return out;
 }
 
 /**

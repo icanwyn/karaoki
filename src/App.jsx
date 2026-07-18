@@ -12,18 +12,15 @@ import {
   parseLrc,
 } from "./lib/lyrics.js";
 import {
-  alignLyricsToAsr,
-  alignmentMatchRate,
-} from "./lib/alignLyrics.js";
-import {
   buildShareUrl,
   loadProject,
   readShareFromLocation,
   saveProject,
 } from "./lib/storage.js";
 import { exportKaraokeVideo } from "./lib/videoExport.js";
-import { transcribeSong, UNTAPPED_START } from "./lib/transcribe.js";
-import { findActiveWindow, estimateTimingsInWindow, decodeMono16k } from "./lib/audioAlign.js";
+import { UNTAPPED_START } from "./lib/constants.js";
+import { syncLyricsToAudio } from "./lib/syncLyrics.js";
+import { energySyncLyrics } from "./lib/energySync.js";
 
 function revokeIfBlob(url) {
   if (url && url.startsWith("blob:")) {
@@ -356,22 +353,17 @@ export default function App() {
   }, [lyrics, wordList, duration]);
 
   /**
-   * Sync *your* lyrics to the song audio.
-   * Unlike ElevenLabs (which invents audio + timestamps together), songs need
-   * forced alignment: hear the track → map your words onto those times.
-   * Old "Auto-time" only spread words evenly and ignored the recording.
+   * Sync pasted lyrics to the song.
+   * Does NOT run browser Whisper (that froze the page). Uses:
+   * 1) server Whisper API (network) + align your text
+   * 2) or fast energy-based timing (no ML)
    */
   const handleAutoTime = useCallback(async () => {
     if (!wordList.length) {
       setExportError("Paste lyrics first.");
       return;
     }
-    if (!duration && !audioFile && !audioUrl) {
-      setExportError("Load audio first.");
-      return;
-    }
 
-    // Resolve file for Whisper
     let file = audioFile;
     if (!file && audioUrl) {
       try {
@@ -379,21 +371,16 @@ export default function App() {
         const blob = await res.blob();
         file = new File([blob], "song.audio", { type: blob.type || "audio/mpeg" });
       } catch {
-        /* fall through */
+        /* ignore */
       }
     }
-
-    // No audio blob → silence-aware even spread only (legacy fallback)
     if (!file) {
-      if (!duration) {
-        setExportError("Load audio so we can sync.");
+      if (duration) {
+        setTimedWords(estimateTimings(wordList, duration));
+        setExportMessage("Even timing only — re-upload the song for real sync.");
         return;
       }
-      setTimedWords(estimateTimings(wordList, duration));
-      setExportError("");
-      setExportMessage(
-        `Evenly timed ${wordList.length} words (no audio file for alignment). Re-upload the song and click Sync again for real sync.`
-      );
+      setExportError("Upload a song first.");
       return;
     }
 
@@ -404,63 +391,29 @@ export default function App() {
 
     setAutoBusy(true);
     setAutoProgress(0.05);
-    setAutoStatus("Listening to song to align your lyrics…");
+    setAutoStatus("Syncing lyrics (page stays responsive)…");
     setExportError("");
     setExportMessage("");
     audioRef.current?.pause();
 
     try {
-      // 1) ASR with word times (OpenAI Whisper if key set), guided by your lyrics
-      const result = await transcribeSong(file, {
+      const result = await syncLyricsToAudio(file, lyrics, {
         signal: ac.signal,
         durationHint: duration || 0,
-        prompt: lyrics,
         onProgress: (p) => {
-          if (typeof p.progress === "number") setAutoProgress(p.progress * 0.85);
+          if (typeof p.progress === "number") setAutoProgress(p.progress);
           if (p.status) setAutoStatus(p.status);
         },
       });
 
-      setAutoStatus("Mapping your lyrics onto the audio…");
-      setAutoProgress(0.9);
-
-      const asrWords = result.words || [];
-      let aligned = alignLyricsToAsr(wordList, asrWords, {
-        duration: duration || result.words?.at?.(-1)?.end || 0,
-      });
-
-      // If ASR is useless, fall back to energy-window even spacing of *your* words
-      const match = alignmentMatchRate(wordList, asrWords);
-      if (!aligned.length || (match < 0.15 && asrWords.length < wordList.length * 0.2)) {
-        setAutoStatus("Weak vocal match — spacing your lyrics over the audible section…");
-        try {
-          const decoded = await decodeMono16k(file);
-          const win = findActiveWindow(decoded.samples, decoded.sampleRate);
-          aligned = estimateTimingsInWindow(wordList, win.start, win.end);
-        } catch {
-          aligned = estimateTimings(wordList, duration || 180);
-        }
-        setTimedWords(aligned);
-        setExportMessage(
-          `Synced ${aligned.length} of your words with a rough energy map ` +
-            `(ASR match ${(match * 100).toFixed(0)}% — vocals may be hard to hear). ` +
-            `Use Global offset or Tap Sync to refine.`
-        );
-      } else {
-        // Keep the lyrics text the user typed; only timings change
-        setTimedWords(aligned);
-        const first = aligned[0];
-        setExportMessage(
-          `✓ Aligned ${aligned.length} of your lyrics to the audio ` +
-            `(${result.provider}, match ~${(match * 100).toFixed(0)}%). ` +
-            `First word at ${first.start.toFixed(1)}s. ` +
-            `This is the karaoke equivalent of ElevenLabs timestamps — but for a real song. ` +
-            `Nudge with Global offset if still early/late overall.`
-        );
-      }
-
-      setExportError("");
+      setTimedWords(result.words);
       setOffsetMs(0);
+      setExportError("");
+      setExportMessage(
+        `✓ Synced ${result.words.length} words via ${result.method}. ` +
+          `First highlight at ${(result.firstAt ?? result.words[0]?.start ?? 0).toFixed(1)}s. ` +
+          `${result.note || ""} Use Global offset or Tap Sync to refine.`
+      );
       setStatus("play");
       setMode("play");
     } catch (err) {
@@ -468,15 +421,7 @@ export default function App() {
       if (err?.name === "AbortError") {
         setExportMessage("Sync cancelled.");
       } else {
-        // Last resort: even timing so the user isn't stuck
-        if (duration && wordList.length) {
-          setTimedWords(estimateTimings(wordList, duration));
-          setExportError(
-            `${err?.message || "Align failed"} — fell back to even timing. Try Tap Sync.`
-          );
-        } else {
-          setExportError(err?.message || "Could not sync lyrics to audio");
-        }
+        setExportError(err?.message || "Could not sync lyrics");
       }
     } finally {
       setAutoBusy(false);
@@ -511,10 +456,13 @@ export default function App() {
     setExportMessage("Timings cleared — ready for Tap Sync.");
   }, [wordList]);
 
+  /**
+   * Auto lyrics: server Whisper only (never browser ML — that froze the tab).
+   * If server fails, tell user to paste lyrics + Sync (energy path).
+   */
   const handleAutoFromSong = useCallback(async () => {
     if (autoBusy) return;
 
-    // Resolve a real Blob/File even if only a blob: URL remains
     let file = audioFile;
     if (!file && audioUrl) {
       try {
@@ -522,11 +470,11 @@ export default function App() {
         const blob = await res.blob();
         file = new File([blob], "song.audio", { type: blob.type || "audio/mpeg" });
       } catch {
-        /* fall through */
+        /* ignore */
       }
     }
     if (!file) {
-      setExportError("Upload a song first, then click Auto lyrics from song.");
+      setExportError("Upload a song first.");
       return;
     }
 
@@ -535,71 +483,84 @@ export default function App() {
     autoAbortRef.current = ac;
 
     setAutoBusy(true);
-    setAutoProgress(0.02);
-    setAutoStatus("Starting auto lyrics…");
+    setAutoProgress(0.05);
+    setAutoStatus("Transcribing on server (no browser freeze)…");
     setExportError("");
     setExportMessage("");
     setIsSyncing(false);
     audioRef.current?.pause();
-    setStatus("edit");
-    setMode("edit");
 
     try {
-      const result = await transcribeSong(file, {
-        signal: ac.signal,
-        durationHint: duration || 0,
-        onProgress: (p) => {
-          if (typeof p.progress === "number") setAutoProgress(p.progress);
-          if (p.status) setAutoStatus(p.status);
-        },
-      });
+      // Reuse sync path: empty lyrics → server returns text; we set lyrics from result
+      // Call server via syncLyrics with placeholder that forces server ASR text
+      const form = new FormData();
+      form.append("file", file, file.name || "song.mp3");
+      setAutoProgress(0.15);
+      setAutoStatus("Server Whisper…");
 
-      let words = result.words || [];
-      if (!words.length && result.fullText) {
-        const tokens = flattenWords(result.fullText);
-        words = estimateTimings(tokens, duration || 180);
+      const ctrl = ac.signal;
+      const res = await fetch("/api/transcribe", { method: "POST", body: form, signal: ctrl });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          data.message ||
+            data.error ||
+            "Server transcription failed. Paste official lyrics and use Sync lyrics to audio."
+        );
       }
+
+      const asrWords = (data.words || [])
+        .map((w) => ({
+          text: String(w.text || w.word || "").trim(),
+          start: Number(w.start) || 0,
+          end: Number(w.end) || 0,
+        }))
+        .filter((w) => w.text);
+
+      let words = asrWords;
+      let lyricsText = data.lyrics || data.text || words.map((w) => w.text).join(" ");
+
+      if (!words.length && data.text) {
+        // Text only — energy-time it
+        setAutoStatus("Placing transcript with energy sync…");
+        const tokens = flattenWords(data.text);
+        const energy = await energySyncLyrics(file, tokens, {
+          signal: ac.signal,
+          durationHint: duration || 0,
+          onProgress: (p) => {
+            if (p.progress != null) setAutoProgress(0.5 + p.progress * 0.5);
+            if (p.status) setAutoStatus(p.status);
+          },
+        });
+        words = energy.words;
+        lyricsText = wordsToLyricsSafe(words);
+      }
+
       if (!words.length) {
-        throw new Error("No words returned. Try another track or paste lyrics.");
+        throw new Error(
+          "No lyrics detected. Paste official lyrics and click Sync lyrics to audio."
+        );
       }
 
-      const lyricsText = result.lyrics || wordsToLyricsSafe(words);
-      setLyrics(lyricsText);
+      setLyrics(typeof lyricsText === "string" ? lyricsText : wordsToLyricsSafe(words));
       setTimedWords(words);
       setOffsetMs(0);
-
-      const first = words[0];
-      const last = words[words.length - 1];
-      const span = (last?.end ?? 0) - (first?.start ?? 0);
-      const providerLabel =
-        result.provider === "openai"
-          ? "server Whisper"
-          : result.provider?.includes("estimate")
-            ? "Whisper + timing estimate"
-            : "on-device Whisper";
-
-      const extra = [result.note, result.appliedShiftSec && Math.abs(result.appliedShiftSec) >= 0.2
-        ? `Shifted +${result.appliedShiftSec.toFixed(2)}s to match audio start.`
-        : ""]
-        .filter(Boolean)
-        .join(" ");
-
-      setExportMessage(
-        `✓ Auto-synced ${words.length} words (${providerLabel}). ` +
-          `First highlight at ${first.start.toFixed(1)}s · span ${span.toFixed(1)}s. ` +
-          `${extra} ` +
-          `Free Whisper often mis-hears sung lyrics — paste official lyrics + Auto-time for accuracy, ` +
-          `or Tap Sync. Global offset if everything is still early/late together.`
-      );
       setExportError("");
+      setExportMessage(
+        `✓ Transcribed ${words.length} words via server Whisper. ` +
+          `First at ${words[0].start.toFixed(1)}s. ` +
+          `For accurate text, paste official lyrics and Sync lyrics to audio.`
+      );
       setStatus("play");
       setMode("play");
     } catch (err) {
       console.error("[karaoki] auto lyrics failed", err);
       if (err?.name === "AbortError") {
-        setExportMessage("Auto lyrics cancelled.");
+        setExportMessage("Cancelled.");
       } else {
-        setExportError(err?.message || "Auto lyrics failed");
+        setExportError(
+          `${err?.message || "Auto lyrics failed"} — paste lyrics and use Sync (energy), no freeze.`
+        );
       }
     } finally {
       setAutoBusy(false);
@@ -608,6 +569,10 @@ export default function App() {
       autoAbortRef.current = null;
     }
   }, [audioFile, audioUrl, autoBusy, duration]);
+
+  const handleCancelAuto = useCallback(() => {
+    autoAbortRef.current?.abort();
+  }, []);
 
   const handleStartSync = useCallback(async () => {
     const texts =
@@ -955,6 +920,7 @@ export default function App() {
               onAutoTime={handleAutoTime}
               onClear={handleClearLyrics}
               onAutoFromSong={handleAutoFromSong}
+              onCancelAuto={handleCancelAuto}
               wordCount={wordList.length}
               timedCount={timedWords.filter((w) => w.start < UNTAPPED_START / 2).length}
               hasDuration={duration > 0}

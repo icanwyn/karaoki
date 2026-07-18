@@ -88,6 +88,20 @@ function applyOffset(words, offsetSec) {
   }));
 }
 
+function wordsToLyricsSafe(words) {
+  if (!words?.length) return "";
+  const lines = [];
+  let buf = [];
+  for (let i = 0; i < words.length; i++) {
+    buf.push(words[i].text);
+    if (buf.length >= 8 || i === words.length - 1) {
+      lines.push(buf.join(" "));
+      buf = [];
+    }
+  }
+  return lines.join("\n");
+}
+
 /** Seal word ends so they meet the next start cleanly. */
 function sealWordEnds(words, duration = 0) {
   const fixed = words.map((w) => ({ ...w }));
@@ -378,19 +392,31 @@ export default function App() {
   }, [wordList]);
 
   const handleAutoFromSong = useCallback(async () => {
-    if (!audioFile || autoBusy) {
-      if (!audioFile) setExportError("Upload a song first.");
+    if (autoBusy) return;
+
+    // Resolve a real Blob/File even if only a blob: URL remains
+    let file = audioFile;
+    if (!file && audioUrl) {
+      try {
+        const res = await fetch(audioUrl);
+        const blob = await res.blob();
+        file = new File([blob], "song.audio", { type: blob.type || "audio/mpeg" });
+      } catch {
+        /* fall through */
+      }
+    }
+    if (!file) {
+      setExportError("Upload a song first, then click Auto lyrics from song.");
       return;
     }
 
-    // Cancel any previous run
     autoAbortRef.current?.abort();
     const ac = new AbortController();
     autoAbortRef.current = ac;
 
     setAutoBusy(true);
-    setAutoProgress(0);
-    setAutoStatus("Starting…");
+    setAutoProgress(0.02);
+    setAutoStatus("Starting auto lyrics…");
     setExportError("");
     setExportMessage("");
     setIsSyncing(false);
@@ -399,8 +425,9 @@ export default function App() {
     setMode("edit");
 
     try {
-      const result = await transcribeSong(audioFile, {
+      const result = await transcribeSong(file, {
         signal: ac.signal,
+        durationHint: duration || 0,
         onProgress: (p) => {
           if (typeof p.progress === "number") setAutoProgress(p.progress);
           if (p.status) setAutoStatus(p.status);
@@ -408,29 +435,46 @@ export default function App() {
       });
 
       let words = result.words || [];
-      // If we only got text without times, estimate across duration
       if (!words.length && result.fullText) {
         const tokens = flattenWords(result.fullText);
         words = estimateTimings(tokens, duration || 180);
       }
+      if (!words.length) {
+        throw new Error("No words returned. Try another track or paste lyrics.");
+      }
 
-      const lyricsText = result.lyrics || words.map((w) => w.text).join(" ");
+      const lyricsText = result.lyrics || wordsToLyricsSafe(words);
       setLyrics(lyricsText);
       setTimedWords(words);
       setOffsetMs(0);
-      const shiftNote =
-        result.appliedShiftSec && Math.abs(result.appliedShiftSec) >= 0.15
-          ? ` Onset-aligned by ${(result.appliedShiftSec >= 0 ? "+" : "") + result.appliedShiftSec.toFixed(2)}s.`
-          : "";
+
+      const first = words[0];
+      const last = words[words.length - 1];
+      const span = (last?.end ?? 0) - (first?.start ?? 0);
+      const providerLabel =
+        result.provider === "openai"
+          ? "server Whisper"
+          : result.provider?.includes("estimate")
+            ? "Whisper + timing estimate"
+            : "on-device Whisper";
+
+      const extra = [result.note, result.appliedShiftSec && Math.abs(result.appliedShiftSec) >= 0.2
+        ? `Shifted +${result.appliedShiftSec.toFixed(2)}s to match audio start.`
+        : ""]
+        .filter(Boolean)
+        .join(" ");
+
       setExportMessage(
-        `Auto-synced ${words.length} words via ${
-          result.provider === "openai" ? "server Whisper" : "on-device Whisper"
-        }.${shiftNote} If all words are early/late together, use Global offset. If spacing is wrong, use Tap Sync.`
+        `✓ Auto-synced ${words.length} words (${providerLabel}). ` +
+          `Timing span ${span.toFixed(1)}s starting at ${first.start.toFixed(1)}s. ` +
+          `${extra} ` +
+          `Play to check — use Global offset if everything is early/late, Tap Sync if individual words are wrong.`
       );
       setExportError("");
       setStatus("play");
       setMode("play");
     } catch (err) {
+      console.error("[karaoki] auto lyrics failed", err);
       if (err?.name === "AbortError") {
         setExportMessage("Auto lyrics cancelled.");
       } else {
@@ -442,7 +486,7 @@ export default function App() {
       setAutoStatus("");
       autoAbortRef.current = null;
     }
-  }, [audioFile, autoBusy, duration]);
+  }, [audioFile, audioUrl, autoBusy, duration]);
 
   const handleStartSync = useCallback(async () => {
     const texts =

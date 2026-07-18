@@ -94,9 +94,10 @@ export default function LyricsEditor({
       </div>
 
       <p className="hint">
-        <strong>Auto lyrics from song</strong> transcribes vocals and stamps each word to the
-        audio (best for clear vocals). Paste LRC or use Tap Sync to refine. Even spread:
-        Auto-time.
+        <strong>Auto lyrics from song</strong> runs Whisper in your browser (first run downloads
+        the model, then 1–3 min to process). Clear English vocals work best. When timestamps are
+        weak, timings are estimated from the audio energy window — refine with Global offset or
+        Tap Sync. Or paste LRC / lyrics + Auto-time.
       </p>
     </div>
   );

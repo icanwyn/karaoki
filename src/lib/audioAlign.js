@@ -1,6 +1,5 @@
 /**
- * Decode audio to mono 16 kHz Float32Array (best for Whisper)
- * and estimate when sound / vocals actually start.
+ * Decode audio and estimate vocal/active regions for lyric timing.
  */
 
 /**
@@ -66,53 +65,84 @@ function resampleLinear(input, fromRate, toRate) {
 }
 
 /**
- * Find first time (seconds) where RMS energy rises above a fraction of the peak.
- * Used to shift Whisper timestamps when the model ignores instrumental intros.
- * @param {Float32Array} samples
- * @param {number} sampleRate
- * @param {{ thresholdRatio?: number, minHoldSec?: number }} [opts]
- * @returns {number}
+ * RMS envelope (one value per hop).
+ * @returns {{ rms: Float32Array, hopSec: number, peak: number }}
+ */
+function rmsEnvelope(samples, sampleRate, hopSec = 0.05) {
+  const hop = Math.max(1, Math.floor(sampleRate * hopSec));
+  const n = Math.ceil(samples.length / hop);
+  const rms = new Float32Array(n);
+  let peak = 0;
+  for (let i = 0; i < n; i++) {
+    const a = i * hop;
+    const b = Math.min(samples.length, a + hop);
+    let s = 0;
+    for (let j = a; j < b; j++) s += samples[j] * samples[j];
+    const r = Math.sqrt(s / (b - a || 1));
+    rms[i] = r;
+    if (r > peak) peak = r;
+  }
+  return { rms, hopSec: hop / sampleRate, peak };
+}
+
+/**
+ * First sustained energy rise (music/vocals start). For songs this is often
+ * the first beat — do NOT use alone to force-shift Whisper word times.
  */
 export function findEnergyOnset(samples, sampleRate, opts = {}) {
   const thresholdRatio = opts.thresholdRatio ?? 0.12;
   const minHoldSec = opts.minHoldSec ?? 0.12;
-  const win = Math.max(1, Math.floor(sampleRate * 0.04)); // 40ms
-  const holdWins = Math.max(1, Math.ceil(minHoldSec / 0.04));
-
-  let peak = 0;
-  const rms = [];
-  for (let i = 0; i < samples.length; i += win) {
-    let s = 0;
-    const end = Math.min(samples.length, i + win);
-    for (let j = i; j < end; j++) s += samples[j] * samples[j];
-    const r = Math.sqrt(s / (end - i || 1));
-    rms.push(r);
-    if (r > peak) peak = r;
-  }
+  const { rms, hopSec, peak } = rmsEnvelope(samples, sampleRate);
   if (peak < 1e-6) return 0;
-
   const thresh = peak * thresholdRatio;
+  const hold = Math.max(1, Math.ceil(minHoldSec / hopSec));
   let run = 0;
   for (let i = 0; i < rms.length; i++) {
     if (rms[i] >= thresh) {
       run += 1;
-      if (run >= holdWins) {
-        return Math.max(0, ((i - holdWins + 1) * win) / sampleRate);
-      }
-    } else {
-      run = 0;
-    }
+      if (run >= hold) return Math.max(0, (i - hold + 1) * hopSec);
+    } else run = 0;
   }
   return 0;
 }
 
 /**
- * Shift word timings so the first word lines up with audio energy onset
- * (when Whisper stamped the first lyric too early/late vs the real track).
+ * Estimate a "singing window" [start, end] using energy above a soft floor,
+ * ignoring a short head/tail silence. Used when we only have plain text.
+ */
+export function findActiveWindow(samples, sampleRate) {
+  const duration = samples.length / sampleRate;
+  const { rms, hopSec, peak } = rmsEnvelope(samples, sampleRate, 0.08);
+  if (peak < 1e-6) return { start: 0, end: duration };
+
+  const thresh = peak * 0.08;
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < rms.length; i++) {
+    if (rms[i] >= thresh) {
+      if (first < 0) first = i;
+      last = i;
+    }
+  }
+  if (first < 0) return { start: 0, end: duration };
+
+  // Trim a little padding; keep at least 40% of the track for lyrics
+  let start = Math.max(0, first * hopSec - 0.15);
+  let end = Math.min(duration, (last + 1) * hopSec + 0.25);
+  if (end - start < duration * 0.4) {
+    start = Math.min(start, duration * 0.05);
+    end = Math.max(end, duration * 0.95);
+  }
+  return { start, end };
+}
+
+/**
+ * ONLY shift when Whisper put the first word *before* real energy (rare),
+ * by a small amount. Never pull late (correct) lyrics back to the first drum hit —
+ * that was destroying auto-sync on normal songs with intros.
  *
  * @param {{ text: string, start: number, end: number }[]} words
  * @param {number} onsetSec
- * @returns {{ words: typeof words, appliedShiftSec: number }}
  */
 export function alignWordsToOnset(words, onsetSec) {
   if (!words?.length || !Number.isFinite(onsetSec)) {
@@ -120,40 +150,70 @@ export function alignWordsToOnset(words, onsetSec) {
   }
 
   const first = words[0].start;
-  // Whisper often puts first word near 0 while the vocal starts later (intro).
-  // Or vice versa after chunking quirks.
-  const shift = onsetSec - first;
-
-  // Only auto-correct meaningful drift (>150ms), cap wild shifts at 45s
-  if (Math.abs(shift) < 0.15 || Math.abs(shift) > 45) {
+  // Only correct the "lyrics stamped during silence before music" case:
+  // first word is early, energy starts later → positive shift only.
+  if (first >= onsetSec - 0.2) {
     return { words, appliedShiftSec: 0 };
   }
 
-  // Prefer shifting when first word is early relative to energy (intro case)
-  // or moderately late (chunk offset). Always apply within cap.
+  const shift = onsetSec - first;
+  // Cap: intros can be long, but >20s of pure silence stamp is unlikely
+  if (shift < 0.2 || shift > 20) {
+    return { words, appliedShiftSec: 0 };
+  }
+
   const shifted = words.map((w) => ({
     ...w,
     start: Math.max(0, w.start + shift),
     end: Math.max(0.05, w.end + shift),
   }));
-
   return { words: shifted, appliedShiftSec: shift };
 }
 
 /**
- * If Whisper compressed timings into a shorter span than the audible region,
- * optionally leave as-is (stretching lyrics across instrumentals is worse).
- * This only clamps ends that overflow the file duration.
- *
- * @param {{ text: string, start: number, end: number }[]} words
- * @param {number} durationSec
+ * Spread plain words evenly across an active window (fallback sync).
+ * @param {string[]} texts
+ * @param {number} startSec
+ * @param {number} endSec
  */
+export function estimateTimingsInWindow(texts, startSec, endSec) {
+  const words = (texts || []).map((t) => String(t).trim()).filter(Boolean);
+  if (!words.length) return [];
+  const start = Math.max(0, Number(startSec) || 0);
+  const end = Math.max(start + words.length * 0.15, Number(endSec) || start + words.length * 0.35);
+  const span = end - start;
+  const slot = span / words.length;
+  return words.map((text, i) => {
+    const s = start + i * slot;
+    return { text, start: s, end: s + Math.max(0.08, slot * 0.92) };
+  });
+}
+
 export function clampWordsToDuration(words, durationSec) {
   if (!words?.length || !durationSec) return words || [];
   const maxT = Math.max(0.5, durationSec - 0.02);
   return words.map((w) => ({
     ...w,
-    start: Math.min(w.start, maxT),
+    start: Math.min(Math.max(0, w.start), maxT),
     end: Math.min(Math.max(w.end, w.start + 0.05), durationSec),
   }));
+}
+
+/**
+ * True if timings look usable (span a meaningful portion of the track).
+ */
+export function timingsLookValid(words, durationSec) {
+  if (!words?.length) return false;
+  const starts = words.map((w) => w.start).filter((s) => Number.isFinite(s));
+  if (!starts.length) return false;
+  const min = Math.min(...starts);
+  const max = Math.max(...words.map((w) => w.end || w.start));
+  const span = max - min;
+  // All piled at 0, or tiny span vs long song → bad
+  if (span < 0.5 && words.length > 4) return false;
+  if (durationSec > 20 && span < durationSec * 0.15 && words.length > 8) return false;
+  // All timestamps identical
+  const uniq = new Set(starts.map((s) => s.toFixed(2)));
+  if (uniq.size === 1 && words.length > 3) return false;
+  return true;
 }

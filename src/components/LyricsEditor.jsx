@@ -30,11 +30,11 @@ export default function LyricsEditor({
         title={
           !hasAudio
             ? "Upload a song first"
-            : "Transcribe vocals and auto-sync word timings"
+            : "Transcribe vocals from the song (may mis-hear sung words)"
         }
       >
         {autoBusy
-          ? `Generating… ${Math.round((autoProgress || 0) * 100)}%`
+          ? `Working… ${Math.round((autoProgress || 0) * 100)}%`
           : "✦ Auto lyrics from song"}
       </button>
 
@@ -47,7 +47,7 @@ export default function LyricsEditor({
             />
           </div>
           <p className="hint" style={{ margin: "6px 0 0" }}>
-            {autoStatus || "Working… first run may download the Whisper model."}
+            {autoStatus || "Working…"}
           </p>
         </div>
       )}
@@ -56,7 +56,7 @@ export default function LyricsEditor({
         className="lyrics-textarea"
         value={lyrics}
         onChange={(e) => onChange?.(e.target.value)}
-        placeholder={`Paste lyrics here, or use Auto lyrics from song…\n\nOne line per phrase works best.\n\nOr paste LRC:\n[00:12.00] Hello world\n[00:15.50] Sing with me`}
+        placeholder={`Paste official lyrics here (best results)…\n\nThen click “Sync lyrics to audio”.\n\nOr paste LRC with timestamps:\n[00:12.00] Hello world`}
         spellCheck={false}
         disabled={autoBusy}
       />
@@ -65,23 +65,23 @@ export default function LyricsEditor({
         <button
           type="button"
           className="btn btn-sm btn-primary"
-          onClick={onParseLrc}
-          disabled={autoBusy}
+          onClick={onAutoTime}
+          disabled={!lyrics.trim() || !hasAudio || autoBusy}
+          title={
+            !hasAudio
+              ? "Upload a song first"
+              : "Align your pasted lyrics to the song (listens to the audio)"
+          }
         >
-          Parse LRC
+          Sync lyrics to audio
         </button>
         <button
           type="button"
           className="btn btn-sm"
-          onClick={onAutoTime}
-          disabled={!lyrics.trim() || !hasDuration || autoBusy}
-          title={
-            !hasDuration
-              ? "Load audio first so we know the duration"
-              : "Spread words evenly (rough timing)"
-          }
+          onClick={onParseLrc}
+          disabled={autoBusy}
         >
-          Auto-time
+          Parse LRC
         </button>
         <button
           type="button"
@@ -94,10 +94,13 @@ export default function LyricsEditor({
       </div>
 
       <p className="hint">
-        <strong>Auto lyrics from song</strong> uses free on-device Whisper. It skips silence/intros
-        so highlights shouldn’t fire before sound, but sung lyrics are often imperfect. For best
-        results: paste official lyrics → <strong>Auto-time</strong>, then nudge with Global offset
-        or Tap Sync. LRC files give the cleanest timing.
+        <strong>Why this isn’t like ElevenLabs karaoke:</strong> ElevenLabs <em>creates</em> the
+        voice from your text and returns exact word times. Here the song already exists — we must
+        <em>listen</em> and map your words onto it.
+        <br />
+        <strong>Best path:</strong> paste official lyrics → <strong>Sync lyrics to audio</strong>{" "}
+        (uses Whisper timings + alignment). LRC is still the gold standard. Refine with Global
+        offset or Tap Sync.
       </p>
     </div>
   );

@@ -70,6 +70,7 @@ function transcribeDevApi(env) {
           form.append("model", "whisper-1");
           form.append("response_format", "verbose_json");
           form.append("timestamp_granularities[]", "word");
+          if (parsed.prompt) form.append("prompt", String(parsed.prompt).slice(0, 800));
 
           const openaiRes = await fetch(
             "https://api.openai.com/v1/audio/transcriptions",
@@ -157,11 +158,14 @@ function parseMultipart(buffer, contentType) {
       buffer,
       filename: "audio.mp3",
       contentType: contentType || "application/octet-stream",
+      prompt: "",
     };
   }
   const boundary = boundaryMatch[1] || boundaryMatch[2];
   const sep = Buffer.from(`--${boundary}`);
   let start = buffer.indexOf(sep) + sep.length;
+  /** @type {any} */
+  const out = { buffer: null, filename: "audio.mp3", contentType: "audio/mpeg", prompt: "" };
   while (start < buffer.length) {
     if (buffer[start] === 45 && buffer[start + 1] === 45) break;
     if (buffer[start] === 13 && buffer[start + 1] === 10) start += 2;
@@ -189,19 +193,22 @@ function parseMultipart(buffer, contentType) {
     }
     if (headerEnd !== -1) {
       const headers = slice.subarray(0, headerEnd).toString("utf8");
-      if (/name="file"/i.test(headers)) {
-        const nameMatch = /filename="([^"]*)"/i.exec(headers);
+      const body = slice.subarray(headerEnd + 4);
+      const nameMatch = /name="([^"]+)"/i.exec(headers);
+      const name = nameMatch?.[1];
+      if (name === "file") {
+        const fn = /filename="([^"]*)"/i.exec(headers);
         const typeMatch = /Content-Type:\s*([^\r\n]+)/i.exec(headers);
-        return {
-          buffer: slice.subarray(headerEnd + 4),
-          filename: nameMatch?.[1] || "audio.mp3",
-          contentType: typeMatch?.[1]?.trim() || "application/octet-stream",
-        };
+        out.buffer = body;
+        out.filename = fn?.[1] || "audio.mp3";
+        out.contentType = typeMatch?.[1]?.trim() || "application/octet-stream";
+      } else if (name === "prompt") {
+        out.prompt = body.toString("utf8").replace(/\0/g, "").trim();
       }
     }
     start = next === -1 ? buffer.length : next + sep.length;
   }
-  return null;
+  return out.buffer ? out : null;
 }
 
 export default defineConfig(({ mode }) => {

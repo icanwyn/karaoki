@@ -1,8 +1,6 @@
 /**
- * Vercel serverless: OpenAI Whisper transcription with word timestamps.
- * Requires OPENAI_API_KEY. Without it, the client falls back to browser Whisper.
- *
- * POST multipart/form-data with field "file" (audio).
+ * Vercel serverless: OpenAI Whisper with word timestamps.
+ * Optional form field "prompt" = known lyrics (guides model + used only server-side).
  */
 
 export const config = {
@@ -11,7 +9,7 @@ export const config = {
   },
 };
 
-const MAX_BYTES = 24 * 1024 * 1024; // Whisper limit ~25MB
+const MAX_BYTES = 24 * 1024 * 1024;
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -45,31 +43,39 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { buffer, filename, contentType } = await readMultipartFile(req);
-    if (!buffer?.length) {
+    const parts = await readMultipart(req);
+    const filePart = parts.file;
+    if (!filePart?.buffer?.length) {
       res.statusCode = 400;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: "missing_file", message: "Audio file is required" }));
       return;
     }
-    if (buffer.length > MAX_BYTES) {
+    if (filePart.buffer.length > MAX_BYTES) {
       res.statusCode = 413;
       res.setHeader("Content-Type", "application/json");
       res.end(
         JSON.stringify({
           error: "file_too_large",
-          message: "Audio must be under 24MB for server transcription. Try browser mode or compress the file.",
+          message: "Audio must be under 24MB for server transcription.",
         })
       );
       return;
     }
 
+    // Whisper prompt is capped (~224 tokens); send a compact lyric guide
+    const promptRaw = String(parts.fields.prompt || "").trim();
+    const prompt = promptRaw ? promptRaw.slice(0, 800) : "";
+
     const form = new FormData();
-    const blob = new Blob([buffer], { type: contentType || "audio/mpeg" });
-    form.append("file", blob, filename || "audio.mp3");
+    const blob = new Blob([filePart.buffer], {
+      type: filePart.contentType || "audio/mpeg",
+    });
+    form.append("file", blob, filePart.filename || "audio.mp3");
     form.append("model", "whisper-1");
     form.append("response_format", "verbose_json");
     form.append("timestamp_granularities[]", "word");
+    if (prompt) form.append("prompt", prompt);
 
     const openaiRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
@@ -99,13 +105,14 @@ export default async function handler(req, res) {
       return;
     }
 
-    const words = (data.words || []).map((w) => ({
-      text: String(w.word || w.text || "").trim(),
-      start: Number(w.start) || 0,
-      end: Number(w.end) || 0,
-    })).filter((w) => w.text);
+    const words = (data.words || [])
+      .map((w) => ({
+        text: String(w.word || w.text || "").trim(),
+        start: Number(w.start) || 0,
+        end: Number(w.end) || 0,
+      }))
+      .filter((w) => w.text);
 
-    // Fallback: distribute segment timings if word-level missing
     let timed = words;
     if (!timed.length && Array.isArray(data.segments)) {
       timed = [];
@@ -128,15 +135,13 @@ export default async function handler(req, res) {
       }
     }
 
-    const lyrics = wordsToLyrics(timed);
-
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(
       JSON.stringify({
         text: data.text || "",
         words: timed,
-        lyrics,
+        lyrics: wordsToLyrics(timed),
       })
     );
   } catch (err) {
@@ -167,38 +172,44 @@ function wordsToLyrics(words) {
   return lines.join("\n");
 }
 
-/**
- * Minimal multipart parser for a single file field named "file".
- */
-async function readMultipartFile(req) {
+async function readMultipart(req) {
   const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(chunk);
-  }
+  for await (const chunk of req) chunks.push(chunk);
   const buffer = Buffer.concat(chunks);
   const contentType = req.headers["content-type"] || "";
   const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+
+  /** @type {{ file: any, fields: Record<string, string> }} */
+  const out = { file: null, fields: {} };
+
   if (!boundaryMatch) {
-    // Raw body fallback
-    return {
+    out.file = {
       buffer,
       filename: "audio.mp3",
       contentType: contentType || "application/octet-stream",
     };
+    return out;
   }
+
   const boundary = boundaryMatch[1] || boundaryMatch[2];
   const parts = splitMultipart(buffer, boundary);
   for (const part of parts) {
-    if (!/name="file"/i.test(part.headers)) continue;
-    const nameMatch = /filename="([^"]*)"/i.exec(part.headers);
-    const typeMatch = /Content-Type:\s*([^\r\n]+)/i.exec(part.headers);
-    return {
-      buffer: part.body,
-      filename: nameMatch?.[1] || "audio.mp3",
-      contentType: typeMatch?.[1]?.trim() || "application/octet-stream",
-    };
+    const nameMatch = /name="([^"]+)"/i.exec(part.headers);
+    const name = nameMatch?.[1];
+    if (!name) continue;
+    if (name === "file") {
+      const fn = /filename="([^"]*)"/i.exec(part.headers);
+      const typeMatch = /Content-Type:\s*([^\r\n]+)/i.exec(part.headers);
+      out.file = {
+        buffer: part.body,
+        filename: fn?.[1] || "audio.mp3",
+        contentType: typeMatch?.[1]?.trim() || "application/octet-stream",
+      };
+    } else {
+      out.fields[name] = part.body.toString("utf8").replace(/\0/g, "").trim();
+    }
   }
-  return { buffer: null, filename: null, contentType: null };
+  return out;
 }
 
 function splitMultipart(buffer, boundary) {
@@ -206,12 +217,11 @@ function splitMultipart(buffer, boundary) {
   const parts = [];
   let start = buffer.indexOf(sep) + sep.length;
   while (start < buffer.length) {
-    if (buffer[start] === 45 && buffer[start + 1] === 45) break; // --
+    if (buffer[start] === 45 && buffer[start + 1] === 45) break;
     if (buffer[start] === 13 && buffer[start + 1] === 10) start += 2;
     const next = buffer.indexOf(sep, start);
     const end = next === -1 ? buffer.length : next;
     let slice = buffer.subarray(start, end);
-    // trim trailing CRLF
     if (slice.length >= 2 && slice[slice.length - 2] === 13 && slice[slice.length - 1] === 10) {
       slice = slice.subarray(0, slice.length - 2);
     }

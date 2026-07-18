@@ -51,7 +51,14 @@ let activeModelId = "";
  * @returns {Promise<TranscribeResult>}
  */
 export async function transcribeSong(audioFile, opts = {}) {
-  const { onProgress, signal, preferBrowser = false, durationHint = 0 } = opts;
+  const {
+    onProgress,
+    signal,
+    preferBrowser = false,
+    durationHint = 0,
+    /** Known lyrics to guide Whisper + for forced alignment on the client */
+    prompt = "",
+  } = opts;
   if (!audioFile) throw new Error("No audio file to transcribe");
 
   onProgress?.({ phase: "decode", progress: 0.04, status: "Decoding audio to 16 kHz…" });
@@ -74,7 +81,11 @@ export async function transcribeSong(audioFile, opts = {}) {
   if (!preferBrowser) {
     try {
       onProgress?.({ phase: "server", progress: 0.08, status: "Trying server Whisper…" });
-      const server = await transcribeViaServer(audioFile, { onProgress, signal });
+      const server = await transcribeViaServer(audioFile, {
+        onProgress,
+        signal,
+        prompt,
+      });
       if (server?.words?.length || server?.fullText) {
         return finalizeResult(server, decoded, duration, onProgress);
       }
@@ -181,11 +192,12 @@ function finalizeResult(result, decoded, duration, onProgress) {
   };
 }
 
-async function transcribeViaServer(audioFile, { onProgress, signal } = {}) {
+async function transcribeViaServer(audioFile, { onProgress, signal, prompt = "" } = {}) {
   const form = new FormData();
   const name =
     audioFile instanceof File && audioFile.name ? audioFile.name : "song.mp3";
   form.append("file", audioFile, name);
+  if (prompt) form.append("prompt", String(prompt).slice(0, 800));
 
   onProgress?.({ phase: "server", progress: 0.15, status: "Uploading to Whisper…" });
 

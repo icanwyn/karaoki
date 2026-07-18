@@ -360,6 +360,138 @@ export class SrtReader {
   }
 
   /**
+   * Set absolute start/end for a cue; scale word times inside proportionally.
+   * @param {number} index
+   * @param {number} startSec
+   * @param {number} endSec
+   */
+  updateCueTimes(index, startSec, endSec) {
+    const cue = this.cues[index];
+    if (!cue) return this;
+    let start = Math.max(0, Number(startSec) || 0);
+    let end = Math.max(start + 0.08, Number(endSec) || start + 1);
+    // Don't overlap neighbors
+    if (index > 0) {
+      const prev = this.cues[index - 1];
+      if (start < prev.start + 0.05) start = prev.start + 0.05;
+      if (start < prev.end) {
+        // allow slight overlap fix by pushing start
+        start = Math.max(start, prev.start + 0.05);
+      }
+    }
+    if (index < this.cues.length - 1) {
+      const next = this.cues[index + 1];
+      if (end > next.end - 0.05) end = Math.max(start + 0.08, next.end - 0.05);
+      if (end > next.start) end = Math.max(start + 0.08, next.start);
+    }
+
+    const oldStart = cue.start;
+    const oldEnd = cue.end;
+    const oldSpan = Math.max(0.05, oldEnd - oldStart);
+    const newSpan = end - start;
+
+    cue.start = start;
+    cue.end = end;
+    if (cue.words?.length) {
+      cue.words = cue.words.map((w) => {
+        const rel0 = (w.start - oldStart) / oldSpan;
+        const rel1 = (w.end - oldStart) / oldSpan;
+        return {
+          ...w,
+          start: start + rel0 * newSpan,
+          end: start + rel1 * newSpan,
+          line: index,
+          cueIndex: index,
+        };
+      });
+    } else {
+      cue.words = placeWeighted(tokenize(cue.text), start, end, index);
+    }
+    this._words = null;
+    return this;
+  }
+
+  /**
+   * Nudge a cue (and its words) by delta seconds.
+   * @param {number} index
+   * @param {number} deltaSec
+   */
+  nudgeCue(index, deltaSec) {
+    const cue = this.cues[index];
+    if (!cue || !deltaSec) return this;
+    return this.updateCueTimes(index, cue.start + deltaSec, cue.end + deltaSec);
+  }
+
+  /**
+   * Rebuild from a flat timed-word list (preserves line grouping when present).
+   * @param {{ text: string, start: number, end: number, line?: number }[]} words
+   */
+  static fromWords(words) {
+    if (!words?.length) return new SrtReader([]);
+    const hasLines = words.some((w) => w.line != null);
+    if (hasLines) {
+      const map = new Map();
+      for (const w of words) {
+        const L = w.line ?? 0;
+        if (!map.has(L)) map.set(L, []);
+        map.get(L).push({ ...w });
+      }
+      const cues = [...map.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([, group], i) => ({
+          index: i + 1,
+          start: group[0].start,
+          end: group[group.length - 1].end,
+          text: group.map((g) => g.text).join(" "),
+          words: group.map((g) => ({ ...g, line: i, cueIndex: i })),
+        }));
+      return new SrtReader(cues);
+    }
+    // One word per cue-ish: group ~8 words
+    const cues = [];
+    for (let i = 0; i < words.length; i += 8) {
+      const group = words.slice(i, i + 8);
+      cues.push({
+        index: cues.length + 1,
+        start: group[0].start,
+        end: group[group.length - 1].end,
+        text: group.map((g) => g.text).join(" "),
+        words: group,
+      });
+    }
+    return new SrtReader(cues);
+  }
+
+  /**
+   * Shift all words from index i onward by delta (for corrective tap sync).
+   * @param {number} wordIndex
+   * @param {number} deltaSec
+   */
+  shiftWordsFrom(wordIndex, deltaSec) {
+    const words = this.words;
+    if (!words.length || !deltaSec) return this;
+    const next = words.map((w, i) => {
+      if (i < wordIndex) return { ...w };
+      return {
+        ...w,
+        start: Math.max(0, w.start + deltaSec),
+        end: Math.max(0.05, w.end + deltaSec),
+      };
+    });
+    // seal previous end
+    if (wordIndex > 0) {
+      next[wordIndex - 1] = {
+        ...next[wordIndex - 1],
+        end: Math.min(next[wordIndex - 1].end, next[wordIndex].start),
+      };
+    }
+    const rebuilt = SrtReader.fromWords(next);
+    this.cues = rebuilt.cues;
+    this._words = null;
+    return this;
+  }
+
+  /**
    * @param {number} index 0-based
    */
   removeCueAt(index) {

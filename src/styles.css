@@ -162,6 +162,73 @@ body {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.srt-editor-row-time {
+  grid-template-columns: auto auto 1fr 32px;
+  align-items: start;
+}
+
+.srt-editor-times {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 88px;
+}
+
+.srt-time-arrow {
+  display: none;
+}
+
+.srt-nudge-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.srt-nudge-col .btn {
+  min-width: 44px;
+  padding: 0 6px;
+  font-size: 0.7rem;
+}
+
+.srt-editor-edit-full {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.srt-time-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.srt-time-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.srt-time-inputs input,
+.srt-editor-text-input {
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-toolbar.is-active {
+  border-color: rgba(159, 212, 216, 0.35);
+  box-shadow: 0 0 24px rgba(159, 212, 216, 0.12);
+}
+
 .srt-editor-time {
   font-size: 0.68rem;
   font-variant-numeric: tabular-nums;

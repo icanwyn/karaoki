@@ -98,20 +98,15 @@ export default function SyncToolbar({
         <p className="hint" style={{ margin: "8px 0 0" }}>
           {syncMode === "corrective" ? (
             <>
-              <strong>Corrective mode:</strong> play continues with your SRT. When highlight is
-              early/late, press <kbd>Space</kbd> on the word you hear — that word and all after
-              shift to match. Esc ends.
+              Press <kbd>Space</kbd> on the <strong>Next</strong> word as you hear it. That word
+              snaps to now, later words shift with it, then it advances to the following word.
+              <kbd>Esc</kbd> / Done saves.
             </>
           ) : (
             <>
-              Press <kbd>Space</kbd> on each word as you hear it. Esc stops.
+              Press <kbd>Space</kbd> on each word. Esc stops.
             </>
           )}
-        </p>
-      )}
-      {!isSyncing && hasAutoTimings && (
-        <p className="hint" style={{ margin: "8px 0 0" }}>
-          Tap correct works <em>with</em> auto/SRT timing — it does not wipe it.
         </p>
       )}
     </div>

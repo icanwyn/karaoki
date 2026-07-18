@@ -469,25 +469,88 @@ export default function App() {
   }, [srtReader, timedWords, projectTitle, offsetSec]);
 
   const hasAutoTimings = useMemo(
-    () => timedWords.some((w) => w.start < UNTAPPED_START / 2 && w.start > 0.001),
+    () =>
+      timedWords.some(
+        (w) =>
+          Number.isFinite(w.start) &&
+          w.start < UNTAPPED_START / 2 &&
+          (w.start > 0.001 || timedWords.length > 3)
+      ),
     [timedWords]
   );
 
+  /** Apply one corrective tap: word i starts at t; later words keep relative spacing. */
+  const applyCorrectiveTap = useCallback((words, i, t) => {
+    const n = words.length;
+    if (i < 0 || i >= n) return words;
+    const next = words.map((w) => ({ ...w }));
+    const oldStart = Number(next[i].start) || 0;
+    const delta = t - oldStart;
+
+    // Shift this word and everything after by the same delta (keeps auto rhythm)
+    for (let j = i; j < n; j++) {
+      next[j] = {
+        ...next[j],
+        start: Math.max(0, (Number(next[j].start) || 0) + delta),
+        end: Math.max(0.05, (Number(next[j].end) || 0) + delta),
+      };
+    }
+
+    // Snap tapped word to exact now
+    next[i] = { ...next[i], text: words[i].text, start: t };
+
+    // End cleanly at next word — NEVER stretch a long hold (that caused "stuck")
+    if (i + 1 < n) {
+      // If next word landed at/before now, push the remainder slightly after now
+      if (next[i + 1].start <= t + 0.06) {
+        const push = t + 0.08 - next[i + 1].start;
+        for (let j = i + 1; j < n; j++) {
+          next[j] = {
+            ...next[j],
+            start: next[j].start + push,
+            end: next[j].end + push,
+          };
+        }
+      }
+      next[i].end = Math.max(t + 0.05, next[i + 1].start);
+    } else {
+      next[i].end = t + 0.28;
+    }
+
+    if (i > 0) {
+      next[i - 1] = {
+        ...next[i - 1],
+        end: Math.max(next[i - 1].start + 0.04, Math.min(next[i - 1].end, t)),
+      };
+    }
+
+    // Light monotonic pass — do not re-stretch durations
+    for (let j = 0; j < n - 1; j++) {
+      if (next[j].end > next[j + 1].start) {
+        next[j].end = next[j + 1].start;
+      }
+      if (next[j].end <= next[j].start) {
+        next[j].end = Math.min(next[j].start + 0.05, next[j + 1].start);
+      }
+    }
+    const last = n - 1;
+    if (next[last].end <= next[last].start) {
+      next[last].end = next[last].start + 0.2;
+    }
+    return next;
+  }, []);
+
   /**
    * Tap sync in tandem with SRT/auto timings:
-   * - If timings exist → corrective mode (keep auto, Space shifts from current word forward)
-   * - Else → classic full stamp from start
+   * - If timings exist → corrective (keep auto; Space = this word now + advance)
+   * - Else → full stamp from start
    */
   const handleStartSync = useCallback(async () => {
-    const existing = timedWords.filter((w) => w.text);
-    const texts =
-      existing.length > 0
-        ? existing.map((w) => w.text)
-        : wordList.length > 0
-          ? wordList
-          : [];
-    if (!texts.length) {
-      setExportError("Upload an SRT first (or add lyrics).");
+    const existing = timedWords
+      .filter((w) => w.text)
+      .map((w) => ({ ...w }));
+    if (!existing.length && !wordList.length) {
+      setExportError("Upload an SRT first.");
       return;
     }
 
@@ -498,58 +561,58 @@ export default function App() {
       existing.some((w) => Number.isFinite(w.start) && w.start < UNTAPPED_START / 2);
 
     if (corrective) {
-      // Keep existing timings; start correcting from the word under/near the playhead
       const base = existing.map((w) => ({ ...w }));
-      let startIdx = 0;
-      for (let i = 0; i < base.length; i++) {
-        if (base[i].start <= t0 + 0.05) startIdx = i;
-        if (base[i].start > t0 + 0.15) {
-          startIdx = base[i].start > t0 ? i : startIdx;
-          break;
+      // Start at the word that should be active now (or the next one)
+      let startIdx = indexForTime(base, t0);
+      if (startIdx < 0) {
+        startIdx = 0;
+        for (let i = 0; i < base.length; i++) {
+          if (base[i].start >= t0 - 0.05) {
+            startIdx = i;
+            break;
+          }
+          startIdx = i;
         }
-      }
-      // Prefer the next word if we're past the middle of the current one
-      if (
-        startIdx < base.length - 1 &&
-        t0 > (base[startIdx].start + base[startIdx].end) / 2
-      ) {
-        startIdx += 1;
       }
 
       setSyncBaseWords(base);
+      syncBaseRef.current = base;
       setTimedWords(base);
       setSyncIndex(startIdx);
       setIsSyncing(true);
       setStatus("sync");
       setMode("sync");
-      setExportMessage(
-        `Corrective tap from word ${startIdx + 1} (“${base[startIdx]?.text}”). Space = this word is now; shifts the rest.`
-      );
       setExportError("");
-      // Do NOT reset audio — play from here so it works in tandem
+      setExportMessage(
+        `Tap correct: Space when you hear “${base[startIdx]?.text}” — then it jumps to the next word.`
+      );
+
       if (audio && audioUrl && audio.paused) {
         try {
           await audio.play();
         } catch {
-          setExportError("Press Play, then Space to correct.");
+          setExportError("Press Play, then Space.");
         }
       }
       return;
     }
 
-    // Full rebuild only when there are no real timings yet
+    const texts = existing.length
+      ? existing.map((w) => w.text)
+      : wordList;
     const base = texts.map((text) => ({
       text,
       start: UNTAPPED_START,
       end: UNTAPPED_START + 0.05,
     }));
     setSyncBaseWords(base);
+    syncBaseRef.current = base;
     setTimedWords(base);
     setSyncIndex(0);
     setIsSyncing(true);
     setStatus("sync");
     setMode("sync");
-    setExportMessage("Full tap sync: Space on each word. Esc to stop.");
+    setExportMessage("Full tap: Space on each word from the start.");
     setExportError("");
 
     if (audio && audioUrl) {
@@ -558,35 +621,42 @@ export default function App() {
         setCurrentTime(0);
         await audio.play();
       } catch {
-        setExportError("Could not autoplay — press Play, then Tap.");
+        setExportError("Press Play, then Tap.");
       }
     }
   }, [wordList, timedWords, audioUrl, currentTime]);
 
   const handleStopSync = useCallback(() => {
     setTimedWords((prev) => {
-      const sealed = sealWordEnds(prev, audioRef.current?.duration || 0);
-      // Keep SrtReader in sync with corrected words
-      if (sealed.some((w) => w.start < UNTAPPED_START / 2)) {
-        const r = SrtReader.fromWords(sealed.filter((w) => w.start < UNTAPPED_START / 2));
+      const real = prev.filter(
+        (w) => w.text && Number.isFinite(w.start) && w.start < UNTAPPED_START / 2
+      );
+      if (real.length) {
+        const sealed = sealWordEnds(real, audioRef.current?.duration || 0);
+        const r = SrtReader.fromWords(sealed);
         setSrtReader(r);
         setLyrics(r.lyricsText);
+        return sealed;
       }
-      return sealed;
+      return prev;
     });
     setIsSyncing(false);
     setStatus("play");
     setMode("play");
-    setExportMessage("Tap correct finished — auto timings updated.");
+    setExportMessage("Tap correct saved.");
   }, []);
 
   const handleTap = useCallback(() => {
     if (!isSyncingRef.current) return;
     const audio = audioRef.current;
     const t = Math.max(0, audio?.currentTime ?? currentTime);
-    const base = syncBaseRef.current;
-    const i = syncIndexRef.current;
-    if (!base.length || i >= base.length) {
+    // Always read latest list from ref (updated every tap)
+    let base = syncBaseRef.current;
+    if (!base?.length) base = timedWordsRef.current || [];
+    let i = syncIndexRef.current;
+
+    if (!base.length) return;
+    if (i >= base.length) {
       setIsSyncing(false);
       setStatus("play");
       setMode("play");
@@ -594,118 +664,66 @@ export default function App() {
     }
 
     const corrective =
-      base[i] &&
-      Number.isFinite(base[i].start) &&
-      base[i].start < UNTAPPED_START / 2;
+      Number.isFinite(base[i]?.start) && base[i].start < UNTAPPED_START / 2;
 
     if (corrective) {
-      // Tandem correction: shift this word + all following by the lag/lead
       const oldStart = base[i].start;
       const delta = t - oldStart;
-
-      setTimedWords((prev) => {
-        const src = prev.length === base.length ? prev : base;
-        const next = src.map((w, idx) => {
-          if (idx < i) return { ...w };
-          return {
-            ...w,
-            start: Math.max(0, w.start + delta),
-            end: Math.max(0.06, w.end + delta),
-          };
-        });
-        // Snap tapped word exactly to now
-        const hold = Math.max(0.12, (next[i].end || t + 0.35) - next[i].start);
-        next[i] = {
-          ...next[i],
-          text: base[i].text,
-          start: t,
-          end: t + hold,
-        };
-        if (i > 0) {
-          next[i - 1] = {
-            ...next[i - 1],
-            end: Math.max(next[i - 1].start + 0.05, t),
-          };
-        }
-        // Keep relative spacing for following words after snap
-        if (i + 1 < next.length && delta !== 0) {
-          // already shifted; ensure monotonic
-          for (let j = i + 1; j < next.length; j++) {
-            if (next[j].start < next[j - 1].end) {
-              const span = Math.max(0.08, next[j].end - next[j].start);
-              next[j].start = next[j - 1].end;
-              next[j].end = next[j].start + span;
-            }
-          }
-        }
-        const sealed = sealWordEnds(next, audio?.duration || 0);
-        // Live-update SrtReader so dual-line UI stays correct during corrective taps
-        try {
-          const r = SrtReader.fromWords(
-            sealed.filter((w) => w.start < UNTAPPED_START / 2)
-          );
-          setSrtReader(r);
-        } catch {
-          /* ignore */
-        }
-        // Update base ref for subsequent taps
-        syncBaseRef.current = sealed;
-        return sealed;
-      });
-
+      const next = applyCorrectiveTap(base, i, t);
       const nextIdx = i + 1;
+
+      syncBaseRef.current = next;
+      timedWordsRef.current = next;
+      setSyncBaseWords(next);
+      setTimedWords(next);
       setSyncIndex(nextIdx);
-      if (nextIdx >= base.length) {
+
+      try {
+        setSrtReader(SrtReader.fromWords(next));
+      } catch {
+        /* ignore */
+      }
+
+      if (nextIdx >= next.length) {
         setIsSyncing(false);
         setStatus("play");
         setMode("play");
         setExportMessage(
-          `Corrective tap done (last shift ${delta >= 0 ? "+" : ""}${delta.toFixed(2)}s).`
+          `Done. Last fix ${delta >= 0 ? "+" : ""}${delta.toFixed(2)}s on “${base[i].text}”.`
         );
       } else {
         setExportMessage(
-          `Shifted from “${base[i].text}” by ${delta >= 0 ? "+" : ""}${delta.toFixed(2)}s. Next: ${base[nextIdx]?.text || "—"}`
+          `“${base[i].text}” @ ${t.toFixed(2)}s (${delta >= 0 ? "+" : ""}${delta.toFixed(2)}s). Next → “${next[nextIdx].text}”`
         );
       }
       return;
     }
 
-    // Full stamp mode (no prior timings)
-    setTimedWords((prev) => {
-      const next =
-        prev.length === base.length
-          ? prev.map((w) => ({ ...w }))
-          : base.map((w) => ({ ...w }));
-
-      next[i] = {
-        text: base[i].text,
-        start: t,
-        end: t + 0.8,
+    // Full stamp mode
+    const next = base.map((w) => ({ ...w }));
+    next[i] = { text: base[i].text, start: t, end: t + 0.35 };
+    if (i > 0 && next[i - 1].start < UNTAPPED_START / 2) {
+      next[i - 1] = {
+        ...next[i - 1],
+        end: Math.max(next[i - 1].start + 0.05, t),
       };
-      if (i > 0 && next[i - 1].start < UNTAPPED_START / 2) {
-        next[i - 1] = {
-          ...next[i - 1],
-          end: Math.max(next[i - 1].start + 0.05, t),
-        };
-      }
-      return next;
-    });
-
+    }
     const nextIdx = i + 1;
+    syncBaseRef.current = next;
+    setSyncBaseWords(next);
+    setTimedWords(next);
     setSyncIndex(nextIdx);
 
-    if (nextIdx >= base.length) {
+    if (nextIdx >= next.length) {
+      const sealed = sealWordEnds(next, audio?.duration || 0);
+      setTimedWords(sealed);
+      setSrtReader(SrtReader.fromWords(sealed));
       setIsSyncing(false);
       setStatus("play");
       setMode("play");
-      setExportMessage("Sync complete — play back to review.");
-      setTimedWords((prev) => {
-        const sealed = sealWordEnds(prev, audioRef.current?.duration || 0);
-        setSrtReader(SrtReader.fromWords(sealed.filter((w) => w.start < UNTAPPED_START / 2)));
-        return sealed;
-      });
+      setExportMessage("Sync complete.");
     }
-  }, [currentTime]);
+  }, [currentTime, applyCorrectiveTap]);
 
   // Space / Esc for sync
   useEffect(() => {

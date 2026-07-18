@@ -18,9 +18,13 @@ import {
 
 const FAR = 1e9;
 const MODEL_ID = "Xenova/whisper-tiny.en";
+// q8/MatMulNBits often crashes browser WASM ("TransposeDQWeightsForMatMulNBits").
+// Prefer fp32 (compatible). Fall back through other dtypes if needed.
+const DTYPE_CANDIDATES = ["fp32", "fp16", "q8"];
 
 /** @type {Promise<any> | null} */
 let pipePromise = null;
+let activeDtype = "";
 
 /**
  * @typedef {{ text: string, start: number, end: number }} TimedWord
@@ -192,37 +196,68 @@ async function getTranscriber(onProgress) {
     env.allowLocalModels = false;
     env.useBrowserCache = true;
     try {
+      // Browser WASM is more stable single-threaded; avoids some session init races
       if (env.backends?.onnx?.wasm) {
         env.backends.onnx.wasm.numThreads = 1;
+        env.backends.onnx.wasm.simd = true;
       }
     } catch {
       /* ignore */
     }
 
-    onProgress?.({
-      phase: "model",
-      progress: 0.18,
-      status: "Loading Whisper model (first run downloads ~40–75MB)…",
-    });
-
-    return pipeline("automatic-speech-recognition", MODEL_ID, {
-      dtype: "q8",
-      progress_callback: (p) => {
-        if (!p) return;
-        const pct = typeof p.progress === "number" ? p.progress : 0;
-        const frac = Math.min(0.55, 0.18 + (pct / 100) * 0.35);
+    let lastErr = null;
+    for (const dtype of DTYPE_CANDIDATES) {
+      try {
         onProgress?.({
           phase: "model",
-          progress: frac,
-          status:
-            p.status === "done"
-              ? "Model ready"
-              : `Downloading model… ${Math.round(pct)}%`,
+          progress: 0.18,
+          status: `Loading Whisper (${dtype})… first run downloads model weights`,
         });
-      },
-    });
+
+        const pipe = await pipeline("automatic-speech-recognition", MODEL_ID, {
+          dtype,
+          progress_callback: (p) => {
+            if (!p) return;
+            const pct = typeof p.progress === "number" ? p.progress : 0;
+            const frac = Math.min(0.55, 0.18 + (pct / 100) * 0.35);
+            onProgress?.({
+              phase: "model",
+              progress: frac,
+              status:
+                p.status === "done"
+                  ? `Model ready (${dtype})`
+                  : `Downloading ${dtype} model… ${Math.round(pct)}%`,
+            });
+          },
+        });
+
+        // Warm session with a tiny buffer so MatMul/qdq errors surface at load time,
+        // not after a full song wait.
+        onProgress?.({
+          phase: "model",
+          progress: 0.56,
+          status: `Warming up ONNX session (${dtype})…`,
+        });
+        const warm = new Float32Array(16000); // 1s silence
+        await pipe(warm);
+        activeDtype = dtype;
+        console.info("[karaoki] whisper session ready", { model: MODEL_ID, dtype });
+        return pipe;
+      } catch (err) {
+        lastErr = err;
+        console.warn(`[karaoki] dtype ${dtype} failed`, err?.message || err);
+        onProgress?.({
+          phase: "model",
+          progress: 0.2,
+          status: `${dtype} failed (${shortErr(err).slice(0, 48)}) — trying next…`,
+        });
+      }
+    }
+
+    throw lastErr || new Error("Could not create Whisper ONNX session");
   })().catch((err) => {
     pipePromise = null;
+    activeDtype = "";
     throw err;
   });
 
@@ -363,7 +398,7 @@ async function transcribeInBrowser(audioFile, decoded, { onProgress, signal } = 
     return {
       lyrics: wordsToLyrics(parsed.words) || wrapTextAsLyrics(parsed.fullText),
       words: parsed.words,
-      provider: "browser-whisper",
+      provider: activeDtype ? `browser-whisper/${activeDtype}` : "browser-whisper",
       fullText: parsed.fullText,
       note: parsed.note,
     };

@@ -4,13 +4,8 @@
  */
 
 import { compressAudioForUpload } from "./compressAudio.js";
-import {
-  srtToWords,
-  wordsToSrt,
-  looksLikeSrt,
-  parseSrt,
-  refineWordsWithEnergy,
-} from "./srt.js";
+import { srtToWords, wordsToSrt, looksLikeSrt, parseSrt } from "./srt.js";
+import { SrtReader } from "./SrtReader.js";
 import { alignLyricsToAsr, alignmentMatchRate, tokenizeLyricWords } from "./alignLyrics.js";
 import { energySyncLyrics } from "./energySync.js";
 import { decodeMono16k } from "./audioAlign.js";
@@ -199,50 +194,66 @@ export async function syncLyricsToAudio(file, lyricsText, opts = {}) {
 }
 
 /**
- * Apply an uploaded SRT/VTT file.
- * If song audio is provided, refine in-cue word timing with energy so
- * highlights follow the music instead of equal clock ticks.
- *
+ * Apply an uploaded SRT/VTT file via custom SrtReader engine.
  * @param {File} file - .srt/.vtt
  * @param {File|Blob|null} [audioFile]
  */
 export async function loadSrtFile(file, audioFile = null) {
   const text = await file.text();
-  let words = srtToWords(text);
-  if (!words.length) throw new Error("No cues found in SRT/VTT file");
+  const reader = SrtReader.parse(text);
+  if (reader.isEmpty) throw new Error("No cues found in SRT/VTT file");
 
-  let note = `Imported ${parseSrt(text).length} caption lines (weighted word flow).`;
+  let note = `SrtReader loaded ${reader.length} cues.`;
   if (audioFile) {
     try {
       const decoded = await decodeMono16k(audioFile);
-      words = refineWordsWithEnergy(words, decoded.samples, decoded.sampleRate);
-      note += " Refined word timing to audio energy inside each line.";
+      reader.refineWithEnergy(decoded.samples, decoded.sampleRate);
+      note += " Word flow refined to audio energy per line.";
     } catch (err) {
       console.warn("[karaoki] energy refine skipped", err);
-      note += " (Audio refine skipped — using weighted SRT split.)";
+      note += " (Audio refine skipped.)";
     }
   } else {
-    note += " Upload the song too for music-flow refine inside each line.";
+    note += " Upload the song for music-flow refine.";
   }
 
   return {
-    words,
-    srt: text,
-    lyrics: cuesToLyrics(text),
-    firstAt: words[0].start,
+    reader,
+    words: reader.words,
+    srt: reader.toSrt(),
+    lyrics: reader.lyricsText,
+    firstAt: reader.words[0]?.start ?? 0,
     note,
   };
 }
 
 /**
- * Re-apply energy flow to existing timed words (e.g. after offset tweak or re-import).
- * @param {import('./srt.js').TimedWord[]} words
+ * Re-apply energy flow via SrtReader.
+ * @param {{ text: string, start: number, end: number, line?: number }[]} words
  * @param {File|Blob} audioFile
  */
 export async function refineExistingWithAudio(words, audioFile) {
   if (!words?.length || !audioFile) return words;
+  const map = new Map();
+  for (const w of words) {
+    const L = w.line ?? 0;
+    if (!map.has(L)) map.set(L, []);
+    map.get(L).push(w);
+  }
+  const reader = new SrtReader(
+    [...map.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, group], i) => ({
+        index: i + 1,
+        start: group[0].start,
+        end: group[group.length - 1].end,
+        text: group.map((g) => g.text).join(" "),
+        words: group,
+      }))
+  );
   const decoded = await decodeMono16k(audioFile);
-  return refineWordsWithEnergy(words, decoded.samples, decoded.sampleRate);
+  reader.refineWithEnergy(decoded.samples, decoded.sampleRate);
+  return reader.words;
 }
 
 function cuesToLyrics(srt) {

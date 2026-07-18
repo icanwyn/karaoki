@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import UploadPanel, { STOCK_IMAGES } from "./components/UploadPanel.jsx";
+import UploadPanel, { STOCK_IMAGES, stockBackground } from "./components/UploadPanel.jsx";
 import LyricsEditor from "./components/LyricsEditor.jsx";
 import SyncToolbar from "./components/SyncToolbar.jsx";
 import KaraokePlayer from "./components/KaraokePlayer.jsx";
 import VideoStage from "./components/VideoStage.jsx";
+import SrtReaderView from "./components/SrtReaderView.jsx";
 import ExportPanel from "./components/ExportPanel.jsx";
+import { SrtReader } from "./lib/SrtReader.js";
 import {
   estimateTimings,
   flattenWords,
@@ -25,7 +27,8 @@ import {
   loadSrtFile,
   refineExistingWithAudio,
 } from "./lib/syncLyrics.js";
-import { wordsToSrt, looksLikeSrt, srtToWords } from "./lib/srt.js";
+import { wordsToSrt, looksLikeSrt } from "./lib/srt.js";
+import { decodeMono16k } from "./lib/audioAlign.js";
 
 function revokeIfBlob(url) {
   if (url && url.startsWith("blob:")) {
@@ -146,6 +149,8 @@ export default function App() {
   const [stockImageId, setStockImageId] = useState("neon-city");
   const [lyrics, setLyrics] = useState("");
   const [timedWords, setTimedWords] = useState([]);
+  /** @type {[import('./lib/SrtReader.js').SrtReader|null, Function]} */
+  const [srtReader, setSrtReader] = useState(null);
   const [status, setStatus] = useState("edit");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -378,24 +383,27 @@ export default function App() {
       return;
     }
 
-    // Pure SRT paste — weighted words; refine with audio energy if song is loaded
+    // Pure SRT paste — custom SrtReader engine
     if (looksLikeSrt(lyrics)) {
       try {
         setAutoBusy(true);
-        setAutoStatus("Parsing SRT…");
-        let words = srtToWords(lyrics);
-        if (!words.length) throw new Error("Could not parse SRT");
+        setAutoStatus("SrtReader parsing…");
+        const reader = SrtReader.parse(lyrics);
+        if (reader.isEmpty) throw new Error("Could not parse SRT");
         const song = await resolveAudioFile();
         if (song) {
           setAutoStatus("Refining word flow to the music…");
-          words = await refineExistingWithAudio(words, song);
+          const decoded = await decodeMono16k(song);
+          reader.refineWithEnergy(decoded.samples, decoded.sampleRate);
         }
-        setTimedWords(words);
+        setSrtReader(reader);
+        setLyrics(reader.lyricsText);
+        setTimedWords(reader.words);
         setOffsetMs(0);
         setExportError("");
         setExportMessage(
-          `✓ SRT → ${words.length} words (musical in-line timing). First at ${words[0].start.toFixed(1)}s.` +
-            (song ? " Energy-refined to audio." : " Upload the song for tighter flow.")
+          `✓ SrtReader: ${reader.length} cues · ${reader.words.length} words. First at ${reader.words[0].start.toFixed(1)}s.` +
+            (song ? " Energy-refined." : "")
         );
         setStatus("play");
         setMode("play");
@@ -473,6 +481,7 @@ export default function App() {
   const handleClearLyrics = useCallback(() => {
     setLyrics("");
     setTimedWords([]);
+    setSrtReader(null);
     setIsSyncing(false);
     setSyncIndex(0);
     setSyncBaseWords([]);
@@ -525,14 +534,22 @@ export default function App() {
         },
       });
 
-      setLyrics(cap.lyrics || cap.text || "");
-      setTimedWords(cap.words);
+      const reader = cap.srt ? SrtReader.parse(cap.srt) : null;
+      if (reader && !reader.isEmpty) {
+        setSrtReader(reader);
+        setLyrics(reader.lyricsText);
+        setTimedWords(reader.words);
+      } else {
+        setSrtReader(null);
+        setLyrics(cap.lyrics || cap.text || "");
+        setTimedWords(cap.words);
+      }
       setOffsetMs(0);
       setExportError("");
       setExportMessage(
         `✓ SRT from ${cap.provider}: ${cap.words.length} words, first at ${cap.words[0].start.toFixed(1)}s. ` +
           (cap.truncated ? "Long track was trimmed for upload limits. " : "") +
-          "You can Download SRT or edit lyrics and re-sync."
+          "Custom SrtReader is active — click cues to seek."
       );
       setStatus("play");
       setMode("play");
@@ -561,6 +578,7 @@ export default function App() {
         setAutoProgress(0.2);
         const song = await resolveAudioFile();
         const result = await loadSrtFile(file, song);
+        if (result.reader) setSrtReader(result.reader);
         setLyrics(result.lyrics);
         setTimedWords(result.words);
         setOffsetMs(0);
@@ -582,12 +600,32 @@ export default function App() {
   );
 
   const handleDownloadSrt = useCallback(() => {
-    const words = timedWords.filter((w) => w.start < UNTAPPED_START / 2);
-    if (!words.length) {
-      setExportError("No timed words to export as SRT.");
-      return;
+    let srt = "";
+    if (srtReader && !srtReader.isEmpty) {
+      // Apply global offset into export for convenience
+      if (offsetSec) {
+        const clone = SrtReader.fromJSON(srtReader.toJSON());
+        clone.shift(offsetSec);
+        srt = clone.toSrt();
+      } else {
+        srt = srtReader.toSrt();
+      }
+    } else {
+      const words = timedWords.filter((w) => w.start < UNTAPPED_START / 2);
+      if (!words.length) {
+        setExportError("No timed words to export as SRT.");
+        return;
+      }
+      srt = wordsToSrt(
+        offsetSec
+          ? words.map((w) => ({
+              ...w,
+              start: w.start + offsetSec,
+              end: w.end + offsetSec,
+            }))
+          : words
+      );
     }
-    const srt = looksLikeSrt(lyrics) ? lyrics : wordsToSrt(words);
     const blob = new Blob([srt], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -596,7 +634,7 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
     setExportMessage("SRT downloaded.");
-  }, [timedWords, lyrics, projectTitle]);
+  }, [srtReader, timedWords, projectTitle, offsetSec]);
 
   const handleCancelAuto = useCallback(() => {
     autoAbortRef.current?.abort();
@@ -915,16 +953,27 @@ export default function App() {
 
         <section className="panel panel-center">
           <div className="stage-wrap">
-            <VideoStage
-              ref={stageRef}
-              imageUrl={imageUrl}
-              stockImageId={stockImageId}
-              words={displayWords}
-              lyrics={lyrics}
-              currentTime={currentTime}
-              isSyncing={isSyncing}
-              syncIndex={syncIndex}
-            />
+            {srtReader && !srtReader.isEmpty && !isSyncing ? (
+              <SrtReaderView
+                reader={srtReader}
+                currentTime={currentTime}
+                offsetSec={offsetSec}
+                onSeek={handleSeek}
+                imageUrl={imageUrl}
+                stockBg={stockBackground(stockImageId)}
+              />
+            ) : (
+              <VideoStage
+                ref={stageRef}
+                imageUrl={imageUrl}
+                stockImageId={stockImageId}
+                words={displayWords}
+                lyrics={lyrics}
+                currentTime={currentTime}
+                isSyncing={isSyncing}
+                syncIndex={syncIndex}
+              />
+            )}
             <KaraokePlayer
               isPlaying={isPlaying}
               currentTime={currentTime}

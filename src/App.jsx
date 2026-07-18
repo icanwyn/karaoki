@@ -5,6 +5,7 @@ import SyncToolbar from "./components/SyncToolbar.jsx";
 import KaraokePlayer from "./components/KaraokePlayer.jsx";
 import VideoStage from "./components/VideoStage.jsx";
 import SrtReaderView from "./components/SrtReaderView.jsx";
+import SrtEditor from "./components/SrtEditor.jsx";
 import ExportPanel from "./components/ExportPanel.jsx";
 import { SrtReader } from "./lib/SrtReader.js";
 import {
@@ -151,6 +152,7 @@ export default function App() {
   const [timedWords, setTimedWords] = useState([]);
   /** @type {[import('./lib/SrtReader.js').SrtReader|null, Function]} */
   const [srtReader, setSrtReader] = useState(null);
+  const [showSrtEditor, setShowSrtEditor] = useState(false);
   const [status, setStatus] = useState("edit");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -482,9 +484,23 @@ export default function App() {
     setLyrics("");
     setTimedWords([]);
     setSrtReader(null);
+    setShowSrtEditor(false);
     setIsSyncing(false);
     setSyncIndex(0);
     setSyncBaseWords([]);
+  }, []);
+
+  /** Keep timedWords in sync when user edits the SrtReader */
+  const handleSrtReaderChange = useCallback((reader) => {
+    setSrtReader(reader);
+    if (!reader || reader.isEmpty) {
+      setTimedWords([]);
+      setLyrics("");
+      setShowSrtEditor(false);
+      return;
+    }
+    setTimedWords(reader.words);
+    setLyrics(reader.lyricsText);
   }, []);
 
   const handleResetTimings = useCallback(() => {
@@ -925,9 +941,6 @@ export default function App() {
         />
 
         <div className="header-actions">
-          <span className="status-chip" data-tone={statusTone || undefined}>
-            {mode}
-          </span>
           <button
             type="button"
             className="btn btn-export"
@@ -939,26 +952,69 @@ export default function App() {
         </div>
       </header>
 
-      <main className="studio">
-        <UploadPanel
-          audioFile={audioFile}
-          imageFile={imageFile}
-          audioUrl={audioUrl}
-          imageUrl={imageUrl}
-          stockImageId={stockImageId}
-          onAudio={handleAudio}
-          onImage={handleImage}
-          onStockImage={handleStockImage}
-        />
+      <main className="studio studio-clean">
+        <aside className="panel panel-left glass-panel">
+          <div className="panel-body">
+            <UploadPanel
+              audioFile={audioFile}
+              imageFile={imageFile}
+              audioUrl={audioUrl}
+              imageUrl={imageUrl}
+              stockImageId={stockImageId}
+              onAudio={handleAudio}
+              onImage={handleImage}
+              onStockImage={handleStockImage}
+            />
+            <LyricsEditor
+              onClear={handleClearLyrics}
+              onAutoFromSong={handleAutoFromSong}
+              onCancelAuto={handleCancelAuto}
+              onLoadSrtFile={handleLoadSrtFile}
+              onDownloadSrt={handleDownloadSrt}
+              onOpenEditor={() => setShowSrtEditor(true)}
+              timedCount={timedWords.filter((w) => w.start < UNTAPPED_START / 2).length}
+              hasAudio={Boolean(audioFile || audioUrl)}
+              hasReader={Boolean(srtReader && !srtReader.isEmpty)}
+              autoBusy={autoBusy}
+              autoProgress={autoProgress}
+              autoStatus={autoStatus}
+            />
+            <SyncToolbar
+              isSyncing={isSyncing}
+              offsetMs={offsetMs}
+              onOffsetChange={setOffsetMs}
+              onStartSync={handleStartSync}
+              onStopSync={handleStopSync}
+              onTap={handleTap}
+              hasAudio={Boolean(audioUrl)}
+              hasWords={wordList.length > 0 || timedWords.length > 0}
+              disabled={autoBusy}
+            />
+            {(exportError || exportMessage || shareMessage || downloadUrl || exporting) && (
+              <ExportPanel
+                canExport={canExport}
+                exporting={exporting}
+                progress={exportProgress}
+                downloadUrl={downloadUrl}
+                downloadName={downloadName}
+                shareUrl
+                error={exportError}
+                message={exportMessage || shareMessage}
+                onExport={handleExport}
+                onCopyShare={handleCopyShare}
+                onCancel={handleCancelExport}
+              />
+            )}
+          </div>
+        </aside>
 
-        <section className="panel panel-center">
+        <section className="panel panel-center glass-panel">
           <div className="stage-wrap">
             {srtReader && !srtReader.isEmpty && !isSyncing ? (
               <SrtReaderView
                 reader={srtReader}
                 currentTime={currentTime}
                 offsetSec={offsetSec}
-                onSeek={handleSeek}
                 imageUrl={imageUrl}
                 stockBg={stockBackground(stockImageId)}
               />
@@ -987,61 +1043,19 @@ export default function App() {
             />
           </div>
         </section>
+      </main>
 
-        <aside className="panel panel-right">
-          <div className="panel-body">
-            <LyricsEditor
-              lyrics={lyrics}
-              onChange={setLyrics}
-              onParseLrc={handleParseLrc}
-              onAutoTime={handleAutoTime}
-              onClear={handleClearLyrics}
-              onAutoFromSong={handleAutoFromSong}
-              onCancelAuto={handleCancelAuto}
-              onLoadSrtFile={handleLoadSrtFile}
-              onDownloadSrt={handleDownloadSrt}
-              wordCount={wordList.length}
-              timedCount={timedWords.filter((w) => w.start < UNTAPPED_START / 2).length}
-              hasDuration={duration > 0}
-              hasAudio={Boolean(audioFile || audioUrl)}
-              autoBusy={autoBusy}
-              autoProgress={autoProgress}
-              autoStatus={autoStatus}
-              hasSrt={looksLikeSrt(lyrics)}
-            />
-
-            <SyncToolbar
-              isSyncing={isSyncing}
-              syncIndex={syncIndex}
-              totalWords={syncBaseWords.length || wordList.length}
-              nextWord={nextWord}
-              offsetMs={offsetMs}
-              onOffsetChange={setOffsetMs}
-              onStartSync={handleStartSync}
-              onStopSync={handleStopSync}
-              onResetTimings={handleResetTimings}
-              onTap={handleTap}
-              hasAudio={Boolean(audioUrl)}
-              hasWords={wordList.length > 0 || timedWords.length > 0}
-              disabled={autoBusy}
-            />
-
-            <ExportPanel
-              canExport={canExport}
-              exporting={exporting}
-              progress={exportProgress}
-              downloadUrl={downloadUrl}
-              downloadName={downloadName}
-              shareUrl
-              error={exportError}
-              message={exportMessage || shareMessage}
-              onExport={handleExport}
-              onCopyShare={handleCopyShare}
-              onCancel={handleCancelExport}
+      {showSrtEditor && srtReader && (
+        <div className="modal-backdrop" onClick={() => setShowSrtEditor(false)}>
+          <div className="modal-sheet glass-panel" onClick={(e) => e.stopPropagation()}>
+            <SrtEditor
+              reader={srtReader}
+              onChange={handleSrtReaderChange}
+              onClose={() => setShowSrtEditor(false)}
             />
           </div>
-        </aside>
-      </main>
+        </div>
+      )}
     </div>
   );
 }

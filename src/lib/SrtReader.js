@@ -245,6 +245,74 @@ export class SrtReader {
     return this;
   }
 
+  /** Reindex cues + invalidate word cache */
+  _reindex() {
+    this.cues.forEach((c, i) => {
+      c.index = i + 1;
+      for (const w of c.words || []) {
+        w.line = i;
+        w.cueIndex = i;
+      }
+    });
+    this._words = null;
+    return this;
+  }
+
+  /**
+   * Edit cue text and rebuild weighted words (keeps start/end times).
+   * @param {number} index 0-based
+   * @param {string} text
+   */
+  updateCueText(index, text) {
+    const cue = this.cues[index];
+    if (!cue) return this;
+    const cleaned = String(text || "").replace(/\s+/g, " ").trim();
+    if (!cleaned) return this.removeCueAt(index);
+    cue.text = cleaned;
+    cue.lines = cleaned.split(/\n/).map((l) => l.trim()).filter(Boolean);
+    cue.words = placeWeighted(tokenize(cleaned), cue.start, cue.end, index);
+    this._words = null;
+    return this;
+  }
+
+  /**
+   * @param {number} index 0-based
+   */
+  removeCueAt(index) {
+    if (index < 0 || index >= this.cues.length) return this;
+    this.cues.splice(index, 1);
+    return this._reindex();
+  }
+
+  /** Remove first n cues (junk intros from free generators). */
+  trimHead(n = 1) {
+    const count = Math.max(0, Math.min(this.cues.length, Number(n) || 0));
+    if (count) this.cues.splice(0, count);
+    return this._reindex();
+  }
+
+  /** Remove last n cues (junk outros). */
+  trimTail(n = 1) {
+    const count = Math.max(0, Math.min(this.cues.length, Number(n) || 0));
+    if (count) this.cues.splice(this.cues.length - count, count);
+    return this._reindex();
+  }
+
+  /**
+   * Drop empty / near-empty cues and common generator junk.
+   */
+  cleanJunk() {
+    const junk =
+      /^(thanks for watching|subscribe|like and subscribe|music|\[music\]|♪|instrumental|www\.|http)/i;
+    this.cues = this.cues.filter((c) => {
+      const t = (c.text || "").trim();
+      if (!t || t.length < 2) return false;
+      if (junk.test(t)) return false;
+      return true;
+    });
+    return this._reindex();
+  }
+
   /** Serialize to classic SRT. */
   toSrt() {
     let out = "";

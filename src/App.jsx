@@ -510,7 +510,12 @@ export default function App() {
     [timedWords]
   );
 
-  /** Apply one corrective tap: word i starts at t; later words keep relative spacing. */
+  /**
+   * Corrective tap: word i is heard at t.
+   * - Shift i..end by delta so auto spacing is kept
+   * - End word i quickly so highlight does not stick
+   * - Next word stays the anticipated target
+   */
   const applyCorrectiveTap = useCallback((words, i, t) => {
     const n = words.length;
     if (i < 0 || i >= n) return words;
@@ -518,23 +523,18 @@ export default function App() {
     const oldStart = Number(next[i].start) || 0;
     const delta = t - oldStart;
 
-    // Shift this word and everything after by the same delta (keeps auto rhythm)
     for (let j = i; j < n; j++) {
-      next[j] = {
-        ...next[j],
-        start: Math.max(0, (Number(next[j].start) || 0) + delta),
-        end: Math.max(0.05, (Number(next[j].end) || 0) + delta),
-      };
+      const s = Math.max(0, (Number(next[j].start) || 0) + delta);
+      const e = Math.max(s + 0.05, (Number(next[j].end) || 0) + delta);
+      next[j] = { ...next[j], start: s, end: e };
     }
 
-    // Snap tapped word to exact now
     next[i] = { ...next[i], text: words[i].text, start: t };
 
-    // End cleanly at next word — NEVER stretch a long hold (that caused "stuck")
     if (i + 1 < n) {
-      // If next word landed at/before now, push the remainder slightly after now
-      if (next[i + 1].start <= t + 0.06) {
-        const push = t + 0.08 - next[i + 1].start;
+      // Keep a tiny gap after the tapped word so the UI can move on
+      if (next[i + 1].start < t + 0.1) {
+        const push = t + 0.1 - next[i + 1].start;
         for (let j = i + 1; j < n; j++) {
           next[j] = {
             ...next[j],
@@ -543,9 +543,11 @@ export default function App() {
           };
         }
       }
-      next[i].end = Math.max(t + 0.05, next[i + 1].start);
+      // Short hold only — do not cover until next start if next is far
+      // (far next is fine; highlight leaves this word so the Next chip is clear)
+      next[i].end = Math.min(next[i + 1].start, t + 0.12);
     } else {
-      next[i].end = t + 0.28;
+      next[i].end = t + 0.2;
     }
 
     if (i > 0) {
@@ -555,18 +557,14 @@ export default function App() {
       };
     }
 
-    // Light monotonic pass — do not re-stretch durations
     for (let j = 0; j < n - 1; j++) {
-      if (next[j].end > next[j + 1].start) {
-        next[j].end = next[j + 1].start;
-      }
+      if (next[j].end > next[j + 1].start) next[j].end = next[j + 1].start;
       if (next[j].end <= next[j].start) {
         next[j].end = Math.min(next[j].start + 0.05, next[j + 1].start);
       }
     }
-    const last = n - 1;
-    if (next[last].end <= next[last].start) {
-      next[last].end = next[last].start + 0.2;
+    if (next[n - 1].end <= next[n - 1].start) {
+      next[n - 1].end = next[n - 1].start + 0.2;
     }
     return next;
   }, []);
@@ -608,14 +606,17 @@ export default function App() {
 
       setSyncBaseWords(base);
       syncBaseRef.current = base;
+      timedWordsRef.current = base;
       setTimedWords(base);
       setSyncIndex(startIdx);
+      syncIndexRef.current = startIdx; // sync immediately (don't wait for React)
+      isSyncingRef.current = true;
       setIsSyncing(true);
       setStatus("sync");
       setMode("sync");
       setExportError("");
       setExportMessage(
-        `Tap correct: Space when you hear “${base[startIdx]?.text}” — then it jumps to the next word.`
+        `Tap correct ON. Next word: “${base[startIdx]?.text}”. Space = heard it → jumps to the following word.`
       );
 
       if (audio && audioUrl && audio.paused) {
@@ -638,8 +639,11 @@ export default function App() {
     }));
     setSyncBaseWords(base);
     syncBaseRef.current = base;
+    timedWordsRef.current = base;
     setTimedWords(base);
     setSyncIndex(0);
+    syncIndexRef.current = 0;
+    isSyncingRef.current = true;
     setIsSyncing(true);
     setStatus("sync");
     setMode("sync");
@@ -658,36 +662,39 @@ export default function App() {
   }, [wordList, timedWords, audioUrl, currentTime]);
 
   const handleStopSync = useCallback(() => {
-    setTimedWords((prev) => {
-      const real = prev.filter(
-        (w) => w.text && Number.isFinite(w.start) && w.start < UNTAPPED_START / 2
-      );
-      if (real.length) {
-        const sealed = sealWordEnds(real, audioRef.current?.duration || 0);
-        const r = SrtReader.fromWords(sealed);
-        setSrtReader(r);
-        setLyrics(r.lyricsText);
-        return sealed;
-      }
-      return prev;
-    });
+    const prev = timedWordsRef.current?.length
+      ? timedWordsRef.current
+      : timedWords;
+    const real = prev.filter(
+      (w) => w.text && Number.isFinite(w.start) && w.start < UNTAPPED_START / 2
+    );
+    if (real.length) {
+      const sealed = sealWordEnds(real, audioRef.current?.duration || 0);
+      const r = SrtReader.fromWords(sealed);
+      setTimedWords(sealed);
+      timedWordsRef.current = sealed;
+      setSrtReader(r);
+      setLyrics(r.lyricsText);
+      // Refresh backup? keep original upload backup for Reset to SRT
+    }
+    isSyncingRef.current = false;
     setIsSyncing(false);
     setStatus("play");
     setMode("play");
     setExportMessage("Tap correct saved.");
-  }, []);
+  }, [timedWords]);
 
   const handleTap = useCallback(() => {
     if (!isSyncingRef.current) return;
     const audio = audioRef.current;
     const t = Math.max(0, audio?.currentTime ?? currentTime);
-    // Always read latest list from ref (updated every tap)
     let base = syncBaseRef.current;
     if (!base?.length) base = timedWordsRef.current || [];
-    let i = syncIndexRef.current;
+    const i = syncIndexRef.current;
 
     if (!base.length) return;
-    if (i >= base.length) {
+    if (i < 0 || i >= base.length) {
+      isSyncingRef.current = false;
       setIsSyncing(false);
       setStatus("play");
       setMode("play");
@@ -703,8 +710,11 @@ export default function App() {
       const next = applyCorrectiveTap(base, i, t);
       const nextIdx = i + 1;
 
+      // Sync refs FIRST so rapid Space never re-taps the same word
       syncBaseRef.current = next;
       timedWordsRef.current = next;
+      syncIndexRef.current = nextIdx;
+
       setSyncBaseWords(next);
       setTimedWords(next);
       setSyncIndex(nextIdx);
@@ -716,6 +726,7 @@ export default function App() {
       }
 
       if (nextIdx >= next.length) {
+        isSyncingRef.current = false;
         setIsSyncing(false);
         setStatus("play");
         setMode("play");
@@ -724,7 +735,7 @@ export default function App() {
         );
       } else {
         setExportMessage(
-          `“${base[i].text}” @ ${t.toFixed(2)}s (${delta >= 0 ? "+" : ""}${delta.toFixed(2)}s). Next → “${next[nextIdx].text}”`
+          `✓ “${base[i].text}” @ ${t.toFixed(2)}s. Next → “${next[nextIdx].text}” (Space)`
         );
       }
       return;
@@ -732,23 +743,30 @@ export default function App() {
 
     // Full stamp mode
     const next = base.map((w) => ({ ...w }));
-    next[i] = { text: base[i].text, start: t, end: t + 0.35 };
+    next[i] = { text: base[i].text, start: t, end: t + 0.25 };
     if (i > 0 && next[i - 1].start < UNTAPPED_START / 2) {
       next[i - 1] = {
         ...next[i - 1],
         end: Math.max(next[i - 1].start + 0.05, t),
       };
     }
+    if (i + 1 < next.length && next[i + 1].start < UNTAPPED_START / 2) {
+      // leave following untouched in full mode until stamped
+    }
     const nextIdx = i + 1;
     syncBaseRef.current = next;
+    timedWordsRef.current = next;
+    syncIndexRef.current = nextIdx;
     setSyncBaseWords(next);
     setTimedWords(next);
     setSyncIndex(nextIdx);
 
     if (nextIdx >= next.length) {
       const sealed = sealWordEnds(next, audio?.duration || 0);
+      timedWordsRef.current = sealed;
       setTimedWords(sealed);
       setSrtReader(SrtReader.fromWords(sealed));
+      isSyncingRef.current = false;
       setIsSyncing(false);
       setStatus("play");
       setMode("play");
@@ -1030,6 +1048,8 @@ export default function App() {
                 imageUrl={imageUrl}
                 stockBg={stockBackground(stockImageId)}
                 effect={stageEffect}
+                isSyncing={isSyncing}
+                tapTargetIndex={isSyncing ? syncIndex : -1}
               />
             ) : (
               <div className="stage-with-fx">

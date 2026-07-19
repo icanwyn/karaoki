@@ -1517,6 +1517,39 @@ button:disabled {
   color: rgba(255, 255, 255, 0.36);
 }
 
+.srt-w-next {
+  color: var(--cyan);
+  transform: scale(1.08);
+  text-shadow:
+    0 0 12px rgba(159, 212, 216, 0.95),
+    0 0 28px rgba(159, 212, 216, 0.45);
+  animation: next-pulse 1s ease-in-out infinite;
+}
+
+.srt-tap-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #0a0c10;
+  background: linear-gradient(90deg, var(--cyan), #c8ebe8);
+  box-shadow: 0 4px 24px rgba(159, 212, 216, 0.35);
+  white-space: nowrap;
+  max-width: 92%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.srt-tap-banner span {
+  opacity: 0.7;
+  font-weight: 500;
+}
+
 .srt-cue-progress {
   margin-top: 10px;
   height: 3px;

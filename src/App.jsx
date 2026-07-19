@@ -149,6 +149,8 @@ export default function App() {
   const [timedWords, setTimedWords] = useState([]);
   /** @type {[import('./lib/SrtReader.js').SrtReader|null, Function]} */
   const [srtReader, setSrtReader] = useState(null);
+  /** Snapshot of last uploaded SRT (JSON) so Reset can restore it */
+  const [srtBackup, setSrtBackup] = useState(null);
   const [showSrtEditor, setShowSrtEditor] = useState(false);
   const [stageEffect, setStageEffect] = useState("none");
   const [status, setStatus] = useState("edit");
@@ -373,11 +375,36 @@ export default function App() {
     setLyrics("");
     setTimedWords([]);
     setSrtReader(null);
+    setSrtBackup(null);
     setShowSrtEditor(false);
     setIsSyncing(false);
     setSyncIndex(0);
     setSyncBaseWords([]);
+    setOffsetMs(0);
   }, []);
+
+  /** Restore last uploaded SRT + zero offset (undo tap correct / time edits) */
+  const handleResetToSrt = useCallback(() => {
+    if (!srtBackup) {
+      setExportError("Nothing to reset — upload an SRT first.");
+      return;
+    }
+    try {
+      const reader = SrtReader.fromJSON(srtBackup);
+      setSrtReader(reader);
+      setTimedWords(reader.words);
+      setLyrics(reader.lyricsText);
+      setOffsetMs(0);
+      setIsSyncing(false);
+      setSyncIndex(0);
+      setExportError("");
+      setExportMessage("Reset to uploaded SRT (offset cleared).");
+      setStatus("play");
+      setMode("play");
+    } catch (err) {
+      setExportError(err?.message || "Reset failed");
+    }
+  }, [srtBackup]);
 
   /** Keep timedWords in sync when user edits the SrtReader */
   const handleSrtReaderChange = useCallback((reader) => {
@@ -415,12 +442,16 @@ export default function App() {
         setExportMessage("Loading SRT…");
         const song = await resolveAudioFile();
         const result = await loadSrtFile(file, song);
-        if (result.reader) setSrtReader(result.reader);
+        if (result.reader) {
+          setSrtReader(result.reader);
+          // Backup for Reset (after energy refine, as loaded)
+          setSrtBackup(result.reader.toJSON());
+        }
         setLyrics(result.lyrics);
         setTimedWords(result.words);
         setOffsetMs(0);
         setExportMessage(
-          `✓ ${result.note} Edit SRT to trim junk · Offset if early/late.`
+          `✓ ${result.note} Use Reset anytime to restore this upload.`
         );
         setStatus("play");
         setMode("play");
@@ -965,6 +996,8 @@ export default function App() {
               onStartSync={handleStartSync}
               onStopSync={handleStopSync}
               onTap={handleTap}
+              onResetToSrt={handleResetToSrt}
+              canResetToSrt={Boolean(srtBackup)}
               hasAudio={Boolean(audioUrl)}
               hasWords={wordList.length > 0 || timedWords.length > 0}
               hasAutoTimings={hasAutoTimings || Boolean(srtReader && !srtReader.isEmpty)}

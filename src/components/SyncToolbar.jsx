@@ -12,6 +12,8 @@ export default function SyncToolbar({
   onStartSync,
   onStopSync,
   onTap,
+  onResetToSrt,
+  canResetToSrt = false,
   hasAudio,
   hasWords,
   hasAutoTimings = false,
@@ -51,8 +53,9 @@ export default function SyncToolbar({
             className="btn btn-sm btn-ghost"
             onClick={() => onOffsetChange?.(0)}
             disabled={!offsetMs || isSyncing}
+            title="Set global offset back to 0 ms"
           >
-            Reset
+            Reset offset
           </button>
           <button type="button" className="btn btn-sm" onClick={() => nudge(100)} disabled={isSyncing || disabled}>
             +0.1s
@@ -65,19 +68,30 @@ export default function SyncToolbar({
 
       <div className="btn-row" style={{ marginTop: 10 }}>
         {!isSyncing ? (
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            onClick={onStartSync}
-            disabled={!hasAudio || !hasWords || disabled}
-            title={
-              hasAutoTimings
-                ? "Corrective tap: keep auto timings, Space shifts from this word forward"
-                : "Full tap: stamp every word from the start"
-            }
-          >
-            {hasAutoTimings ? "Tap correct" : "Tap sync"}
-          </button>
+          <>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={onStartSync}
+              disabled={!hasAudio || !hasWords || disabled}
+              title={
+                hasAutoTimings
+                  ? "Corrective tap: keep auto timings, Space shifts from this word forward"
+                  : "Full tap: stamp every word from the start"
+              }
+            >
+              {hasAutoTimings ? "Tap correct" : "Tap sync"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={onResetToSrt}
+              disabled={!canResetToSrt || isSyncing || disabled}
+              title="Restore the last uploaded SRT and clear offset"
+            >
+              Reset to SRT
+            </button>
+          </>
         ) : (
           <>
             <button type="button" className="btn btn-sm btn-primary" onClick={onTap}>

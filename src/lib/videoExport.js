@@ -60,9 +60,6 @@ export function getExportPreset(id) {
   return EXPORT_PRESETS.find((p) => p.id === id) || EXPORT_PRESETS[1];
 }
 
-/**
- * What container the current browser can actually record.
- */
 export function resolveExportFormat(opts = {}) {
   const preferMp4 = opts.preferMp4 !== false;
   const forceM4v = Boolean(opts.forceM4v);
@@ -87,7 +84,10 @@ export function resolveExportFormat(opts = {}) {
 }
 
 /**
- * Export karaoke video: canvas frames + song audio, locked to audio clock.
+ * Export karaoke video.
+ *
+ * Length is hard-capped to the song duration (wall-clock timeout + audio ended).
+ * Background videos play/loop — we never seek every frame (that caused freezes/glitches).
  */
 export async function exportKaraokeVideo({
   imageUrl,
@@ -114,12 +114,16 @@ export async function exportKaraokeVideo({
   signal,
 }) {
   /** @type {import('./bgTimeline.js').BgClip[]} */
-  let clips = Array.isArray(bgClips) ? bgClips.filter((c) => c?.url).map((c) => ({ ...c })) : [];
+  let clips = Array.isArray(bgClips)
+    ? bgClips.filter((c) => c?.url).map((c) => ({ ...c }))
+    : [];
   if (!clips.length && videoUrl) {
     clips = [{ id: "v0", type: "video", url: videoUrl, name: "video", durationSec: 8 }];
   }
   if (!clips.length) {
-    const urls = (imageUrls?.length ? imageUrls : imageUrl ? [imageUrl] : []).filter(Boolean);
+    const urls = (imageUrls?.length ? imageUrls : imageUrl ? [imageUrl] : []).filter(
+      Boolean
+    );
     clips = urls.map((url, i) => ({
       id: `img${i}`,
       type: "image",
@@ -132,7 +136,6 @@ export async function exportKaraokeVideo({
   if (!audioUrl) throw new Error("Audio is required for export");
   if (!words?.length) throw new Error("Timed lyrics are required for export");
 
-  // Sort + sanitize word timings for reliable highlight
   const timedWords = words
     .map((w) => ({
       text: String(w.text || "").trim(),
@@ -148,9 +151,7 @@ export async function exportKaraokeVideo({
     }))
     .sort((a, b) => a.start - b.start);
 
-  if (!timedWords.length) {
-    throw new Error("No valid timed lyrics to export");
-  }
+  if (!timedWords.length) throw new Error("No valid timed lyrics to export");
 
   let format = resolveExportFormat({ preferMp4, forceM4v });
   const mimeType = format.mimeType;
@@ -158,26 +159,22 @@ export async function exportKaraokeVideo({
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext("2d", { alpha: false });
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
   if (!ctx) throw new Error("Canvas 2D not available");
 
   /** @type {Map<string, HTMLImageElement|HTMLVideoElement>} */
   const mediaCache = new Map();
-  /** natural media duration for videos (for looping inside a hold slot) */
-  const videoNaturalDur = new Map();
 
   for (const clip of clips) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     if (clip.type === "video") {
       const v = await loadVideo(clip.url);
       mediaCache.set(clip.id, v);
-      const nat =
-        Number.isFinite(v.duration) && v.duration > 0.2
-          ? Math.min(600, v.duration)
-          : 8;
-      videoNaturalDur.set(clip.id, nat);
-      // Keep user/hold duration; only fill if missing
       if (!Number.isFinite(clip.durationSec) || clip.durationSec < 0.5) {
+        const nat =
+          Number.isFinite(v.duration) && v.duration > 0.2
+            ? Math.min(600, v.duration)
+            : 8;
         clip.durationSec = nat;
       }
     } else {
@@ -189,41 +186,48 @@ export async function exportKaraokeVideo({
   }
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
+  // Decode audio for reliable duration (HTMLAudioElement.duration is often wrong)
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  let duration = 0;
+  let audioBuffer = null;
+  try {
+    const res = await fetch(audioUrl);
+    const ab = await res.arrayBuffer();
+    audioBuffer = await audioCtx.decodeAudioData(ab.slice(0));
+    duration = audioBuffer.duration;
+  } catch {
+    /* fall through to element duration */
+  }
+
   const audio = new Audio();
   audio.crossOrigin = "anonymous";
   audio.preload = "auto";
+  audio.loop = false;
   audio.src = audioUrl;
-
   await waitForAudio(audio);
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-  // Prefer a finite positive duration; fall back to last lyric + tail
-  let duration = Number(audio.duration);
-  if (!Number.isFinite(duration) || duration <= 0) {
+  if (!Number.isFinite(duration) || duration <= 0.05) {
+    duration = Number(audio.duration);
+  }
+  if (!Number.isFinite(duration) || duration <= 0.05) {
     const last = timedWords[timedWords.length - 1];
-    duration = (last?.end || last?.start || 0) + 1.5;
+    duration = (last?.end || last?.start || 60) + 1;
   }
-  // Cap runaway metadata (some files report padded length)
-  const lastLyricEnd = timedWords[timedWords.length - 1]?.end || 0;
-  if (duration > lastLyricEnd + 90 && lastLyricEnd > 30) {
-    // keep full audio if intentionally longer, but not wild Infinity-ish
-    duration = Math.min(duration, lastLyricEnd + 30);
-  }
-  if (duration <= 0) throw new Error("Could not determine audio duration");
+  // Absolute safety cap: never export more than 12 minutes of wall clock
+  // (also prevents 35-minute runaway files)
+  const MAX_EXPORT_SEC = 12 * 60;
+  duration = Math.min(duration, MAX_EXPORT_SEC);
 
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const source = audioCtx.createMediaElementSource(audio);
   const dest = audioCtx.createMediaStreamDestination();
-  // Route to recorder only — mute speakers
   const silentGain = audioCtx.createGain();
-  silentGain.gain.value = 0;
+  silentGain.gain.value = 0; // no speakers
   source.connect(dest);
   source.connect(silentGain);
   silentGain.connect(audioCtx.destination);
 
-  // Realtime capture at target fps (captureStream(0) is unreliable without requestFrame)
   const canvasStream = canvas.captureStream(fps);
-  const videoTrack = canvasStream.getVideoTracks()[0];
   const combined = new MediaStream([
     ...canvasStream.getVideoTracks(),
     ...dest.stream.getAudioTracks(),
@@ -256,36 +260,37 @@ export async function exportKaraokeVideo({
 
   const stopped = new Promise((resolve, reject) => {
     recorder.onstop = () => resolve();
-    recorder.onerror = (e) => reject(e.error || new Error("MediaRecorder failed"));
+    recorder.onerror = (e) =>
+      reject(e.error || new Error("MediaRecorder failed"));
   });
 
   let raf = 0;
   let finished = false;
   let activeVideoId = null;
+  let hardStopTimer = 0;
 
   const cleanup = async () => {
     finished = true;
     if (raf) cancelAnimationFrame(raf);
+    if (hardStopTimer) clearTimeout(hardStopTimer);
     try {
-      if (recorder.state !== "inactive") recorder.stop();
+      if (recorder.state === "recording" || recorder.state === "paused") {
+        recorder.stop();
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      audio.pause();
     } catch {
       /* ignore */
     }
     canvasStream.getTracks().forEach((t) => t.stop());
     dest.stream.getTracks().forEach((t) => t.stop());
-    try {
-      audio.pause();
-      audio.removeAttribute("src");
-      audio.load();
-    } catch {
-      /* ignore */
-    }
     for (const el of mediaCache.values()) {
       if (el instanceof HTMLVideoElement) {
         try {
           el.pause();
-          el.removeAttribute("src");
-          el.load();
         } catch {
           /* ignore */
         }
@@ -311,114 +316,91 @@ export async function exportKaraokeVideo({
   signal?.addEventListener("abort", onAbort, { once: true });
 
   const lines = groupIntoLines(timedWords, lyrics);
+  const PREVIEW_LEAD = 5;
 
-  const drawCoverMedia = (sourceEl, sw, sh) => {
-    if (!sourceEl || !sw || !sh) return;
+  const drawCover = (el, sw, sh) => {
+    if (!el || !sw || !sh) return;
     const scale = Math.max(width / sw, height / sh);
     const dw = sw * scale;
     const dh = sh * scale;
-    const dx = (width - dw) / 2;
-    const dy = (height - dh) / 2;
     try {
-      ctx.drawImage(sourceEl, dx, dy, dw, dh);
+      ctx.drawImage(el, (width - dw) / 2, (height - dh) / 2, dw, dh);
     } catch {
-      /* drawImage can throw if frame not ready */
-    }
-  };
-
-  const pauseAllVideos = (exceptId = null) => {
-    for (const [id, el] of mediaCache.entries()) {
-      if (id === exceptId) continue;
-      if (el instanceof HTMLVideoElement) {
-        try {
-          el.pause();
-        } catch {
-          /* ignore */
-        }
-      }
+      /* frame not ready */
     }
   };
 
   /**
-   * Keep background video playing & looping — do NOT seek every frame
-   * (seeking every frame freezes decoders around clip end, e.g. ~15s).
+   * Smooth BG video: play + loop. Seek only when the active clip changes.
    */
-  const syncBackground = (t) => {
+  const ensureBgPlaying = (t) => {
     const hit = clipAtTime(clips, t);
-    if (!hit) {
-      pauseAllVideos();
-      activeVideoId = null;
-      return null;
-    }
+    if (!hit) return null;
     const el = mediaCache.get(hit.clip.id);
     if (!el) return null;
 
     if (hit.clip.type === "video" && el instanceof HTMLVideoElement) {
       el.muted = true;
       el.playsInline = true;
-      el.loop = true; // seamless loop for short BGs under long songs
-      const nat = videoNaturalDur.get(hit.clip.id) || el.duration || 1;
-      const local = ((hit.localT % nat) + nat) % nat;
+      el.loop = true;
 
       if (activeVideoId !== hit.clip.id) {
-        pauseAllVideos(hit.clip.id);
-        activeVideoId = hit.clip.id;
-        try {
-          // One seek on clip switch only
-          if (Math.abs((el.currentTime || 0) - local) > 0.2) {
-            el.currentTime = local;
+        // Pause previous clip only
+        if (activeVideoId) {
+          const prev = mediaCache.get(activeVideoId);
+          if (prev instanceof HTMLVideoElement) {
+            try {
+              prev.pause();
+            } catch {
+              /* ignore */
+            }
           }
+        }
+        activeVideoId = hit.clip.id;
+        // One-time start at beginning of this hold (smooth, not per-frame seek)
+        try {
+          el.currentTime = 0;
         } catch {
           /* ignore */
         }
         el.play().catch(() => {});
-      } else {
-        // Same clip: keep playing; restart if ended/paused; soft-correct big drift only
-        if (el.ended || el.paused) {
-          try {
-            el.currentTime = local;
-          } catch {
-            /* ignore */
-          }
-          el.play().catch(() => {});
-        } else if (
-          Number.isFinite(el.currentTime) &&
-          Math.abs(el.currentTime - local) > 1.25
-        ) {
-          try {
-            el.currentTime = local;
-          } catch {
-            /* ignore */
-          }
-        }
+      } else if (el.paused || el.ended) {
+        // Resume without seeking — avoids glitch
+        el.play().catch(() => {});
       }
       return { kind: "video", el };
     }
 
-    pauseAllVideos();
-    activeVideoId = null;
-    if (el instanceof HTMLImageElement) {
-      return { kind: "image", el };
+    // Image
+    if (activeVideoId) {
+      const prev = mediaCache.get(activeVideoId);
+      if (prev instanceof HTMLVideoElement) {
+        try {
+          prev.pause();
+        } catch {
+          /* ignore */
+        }
+      }
+      activeVideoId = null;
     }
+    if (el instanceof HTMLImageElement) return { kind: "image", el };
     return null;
   };
 
-  const PREVIEW_LEAD = 5;
-
   const drawFrame = (t) => {
-    const media = syncBackground(t);
+    const media = ensureBgPlaying(t);
 
     ctx.fillStyle = "#070a12";
     ctx.fillRect(0, 0, width, height);
 
     if (media?.kind === "video") {
-      drawCoverMedia(
+      drawCover(
         media.el,
         media.el.videoWidth || width,
         media.el.videoHeight || height
       );
     } else if (media?.kind === "image") {
-      drawCoverMedia(media.el, media.el.naturalWidth, media.el.naturalHeight);
+      drawCover(media.el, media.el.naturalWidth, media.el.naturalHeight);
     }
 
     // vignette
@@ -435,7 +417,6 @@ export async function exportKaraokeVideo({
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, width, height);
 
-    // lyric bar
     const barH = height * 0.2;
     const barY = height - barH;
     const barGrad = ctx.createLinearGradient(0, barY, 0, height);
@@ -444,7 +425,6 @@ export async function exportKaraokeVideo({
     barGrad.addColorStop(1, "rgba(7,10,18,0.92)");
     ctx.fillStyle = barGrad;
     ctx.fillRect(0, barY, width, barH);
-
     ctx.fillStyle = "rgba(232,160,191,0.35)";
     ctx.fillRect(0, barY, width, Math.max(2, height * 0.002));
 
@@ -485,7 +465,7 @@ export async function exportKaraokeVideo({
       ctx.textAlign = "left";
     }
 
-    const pct = Math.min(1, t / duration);
+    const pct = Math.min(1, Math.max(0, t / duration));
     ctx.fillStyle = "rgba(201,168,76,0.9)";
     ctx.fillRect(
       0,
@@ -493,114 +473,126 @@ export async function exportKaraokeVideo({
       width * pct,
       Math.max(3, height * 0.0025)
     );
-
-    // Push a frame to the recorder when supported
-    try {
-      if (videoTrack && typeof videoTrack.requestFrame === "function") {
-        videoTrack.requestFrame();
-      }
-    } catch {
-      /* ignore */
-    }
   };
 
   try {
     if (audioCtx.state === "suspended") await audioCtx.resume();
 
-    // Prime first frame before recording
+    audio.loop = false;
     audio.currentTime = 0;
     drawFrame(0);
 
-    recorder.start(200);
+    // Start recording + playback together
+    recorder.start(250);
+    const recordStartedAt = performance.now();
 
-    // Must play for MediaElementSource to produce audio samples
     try {
       await audio.play();
-    } catch (err) {
+    } catch {
       throw new Error(
-        "Could not start audio for export. Click the page once and try again."
+        "Could not start audio for export. Click the page once, then export again."
       );
     }
 
-    await new Promise((resolve, reject) => {
-      const onEnded = () => {
-        cleanupListeners();
-        resolve();
-      };
-      const onError = () => {
-        cleanupListeners();
-        reject(new Error("Audio failed during export"));
-      };
-      const onAbortSig = () => {
-        cleanupListeners();
-        reject(new DOMException("Aborted", "AbortError"));
-      };
+    // HARD STOP: MediaRecorder records wall-clock time.
+    // Always stop after song duration + small pad, no matter what audio.currentTime says.
+    const hardMs = Math.ceil(duration * 1000) + 400;
 
-      const cleanupListeners = () => {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        finished = true;
+        if (raf) cancelAnimationFrame(raf);
+        if (hardStopTimer) clearTimeout(hardStopTimer);
         audio.removeEventListener("ended", onEnded);
         audio.removeEventListener("error", onError);
         signal?.removeEventListener("abort", onAbortSig);
+        resolve();
+      };
+
+      const onEnded = () => finish();
+      const onError = () => {
+        settled = true;
+        finished = true;
+        reject(new Error("Audio failed during export"));
+      };
+      const onAbortSig = () => {
+        settled = true;
+        finished = true;
+        reject(new DOMException("Aborted", "AbortError"));
       };
 
       audio.addEventListener("ended", onEnded, { once: true });
       audio.addEventListener("error", onError, { once: true });
       signal?.addEventListener("abort", onAbortSig, { once: true });
 
+      hardStopTimer = setTimeout(finish, hardMs);
+
       const tick = () => {
-        if (finished || signal?.aborted) {
-          cleanupListeners();
-          resolve();
+        if (finished || settled || signal?.aborted) {
+          finish();
           return;
         }
 
-        // Strictly audio clock — never wall-clock past the song
+        // Elapsed wall clock (authoritative for progress + stop)
+        const wallElapsed = (performance.now() - recordStartedAt) / 1000;
+        // Prefer audio clock when it's advancing; clamp to duration
         let t = audio.currentTime;
         if (!Number.isFinite(t) || t < 0) t = 0;
-
-        // Hard stop at song end (prevents 5-min file for 4-min song)
-        if (audio.ended || t >= duration - 0.02) {
-          drawFrame(Math.min(t, duration));
-          onProgress?.(1);
-          cleanupListeners();
-          resolve();
-          return;
-        }
-
-        // If audio stalls mid-export, nudge play — but do not invent time
+        // If audio clock is stuck far behind wall, use wall (keeps BG/lyrics moving)
+        // but never invent time past the song duration
         if (audio.paused && !audio.ended) {
           audio.play().catch(() => {});
         }
+        if (t < wallElapsed - 0.75 && wallElapsed < duration) {
+          // audio lagging — use min so we don't overshoot
+          t = Math.min(duration, Math.max(t, wallElapsed * 0.98));
+        }
+        t = Math.min(t, duration);
+
+        if (wallElapsed >= duration || audio.ended || t >= duration - 0.01) {
+          drawFrame(duration);
+          onProgress?.(1);
+          finish();
+          return;
+        }
 
         drawFrame(t);
-        onProgress?.(Math.min(0.99, t / duration));
+        onProgress?.(Math.min(0.99, wallElapsed / duration));
         raf = requestAnimationFrame(tick);
       };
 
       raf = requestAnimationFrame(tick);
     });
 
-    // Final frame + brief drain so encoder flushes last samples
-    try {
-      drawFrame(Math.min(audio.currentTime || duration, duration));
-    } catch {
-      /* ignore */
-    }
-    onProgress?.(1);
-
-    await sleep(180);
-    if (recorder.state === "recording") recorder.stop();
-    await stopped;
-
-    // Ensure audio is stopped so no trailing silence is held
+    // Freeze last frame, stop audio immediately so no silence is encoded
     try {
       audio.pause();
     } catch {
       /* ignore */
     }
+    try {
+      drawFrame(duration);
+    } catch {
+      /* ignore */
+    }
+    onProgress?.(1);
+
+    // Tiny drain for encoder, then stop recorder ASAP
+    await sleep(120);
+    if (recorder.state === "recording") {
+      recorder.stop();
+    }
+    await stopped;
 
     const blob = new Blob(chunks, { type: format.mimeType || "video/webm" });
-    await cleanup();
+
+    // Detach without waiting on full cleanup path delays
     signal?.removeEventListener("abort", onAbort);
+    await cleanup();
+
     return {
       blob,
       mimeType: format.mimeType,
@@ -611,8 +603,8 @@ export async function exportKaraokeVideo({
       duration,
     };
   } catch (err) {
-    await cleanup();
     signal?.removeEventListener("abort", onAbort);
+    await cleanup();
     throw err;
   }
 }
@@ -651,20 +643,18 @@ function drawLyricLine(
 
   line.words.forEach((w, i) => {
     const globalIndex = line.startIndex + i;
-    let color = "rgba(255,255,255,0.42)";
+    let color = "rgba(255,255,255,0.48)";
     let shadow = "transparent";
     let shadowBlur = 0;
 
     if (activeIndex >= 0 && globalIndex < activeIndex) {
-      color = "rgba(255,255,255,0.82)";
-      shadow = "rgba(255,255,255,0.2)";
-      shadowBlur = fontSize * 0.15;
+      color = "rgba(255,255,255,0.85)";
+      shadow = "rgba(255,255,255,0.15)";
+      shadowBlur = fontSize * 0.12;
     } else if (activeIndex >= 0 && globalIndex === activeIndex) {
       color = highlightHex;
       shadow = highlightGlow;
-      shadowBlur = fontSize * 0.55;
-    } else {
-      color = "rgba(255,255,255,0.48)";
+      shadowBlur = fontSize * 0.5;
     }
 
     ctx.shadowColor = shadow;
@@ -728,7 +718,7 @@ function loadVideo(url) {
     v.preload = "auto";
     v.loop = true;
     let settled = false;
-    const finish = (ok) => {
+    const done = (ok) => {
       if (settled) return;
       settled = true;
       v.removeEventListener("loadeddata", onReady);
@@ -744,16 +734,15 @@ function loadVideo(url) {
       } catch {
         /* ignore */
       }
-      finish(true);
+      done(true);
     };
-    const onErr = () => finish(false);
+    const onErr = () => done(false);
     v.addEventListener("loadeddata", onReady);
     v.addEventListener("canplay", onReady);
     v.addEventListener("error", onErr);
     setTimeout(() => {
-      // Some browsers fire slowly for blob: URLs
       if (v.readyState >= 2) onReady();
-    }, 2500);
+    }, 3000);
     v.src = url;
     v.load();
   });
@@ -781,10 +770,10 @@ function waitForAudio(audio) {
     audio.addEventListener("canplaythrough", onReady);
     audio.addEventListener("loadedmetadata", onReady);
     audio.addEventListener("error", onErr);
-    // Failsafe so export never hangs forever
     setTimeout(() => {
       if (Number.isFinite(audio.duration) && audio.duration > 0) onReady();
-    }, 8000);
+      else if (audio.readyState >= 1) onReady();
+    }, 6000);
     audio.load();
   });
 }

@@ -194,34 +194,92 @@ export class SrtReader {
    * @param {number} t
    */
   snapshot(t) {
+    const PREVIEW_LEAD = 5; // show first line only this many seconds early
     const cues = this.cues;
-    if (!cues.length) {
+    const empty = {
+      time: t,
+      cueIndex: -1,
+      pairStart: -1,
+      lineA: null,
+      lineB: null,
+      cue: null,
+      next: null,
+      prev: null,
+      wordIndex: -1,
+      wordProgress: 0,
+      wordStates: [],
+      cueProgress: 0,
+      waitingForFirst: false,
+      showDots: false,
+      previewIntro: false,
+      inGap: false,
+      secondsToFirst: 0,
+    };
+
+    if (!cues.length) return empty;
+
+    const firstStart = cues[0].start;
+
+    // Far before first lyric — three dots only (no first line, no countdown)
+    if (t < firstStart - PREVIEW_LEAD - 0.02) {
       return {
-        time: t,
-        cueIndex: -1,
-        lineA: null,
+        ...empty,
+        waitingForFirst: true,
+        showDots: true,
+        secondsToFirst: firstStart - t,
+      };
+    }
+
+    // 5s lead-in: introduce ONLY the first line (upcoming), never other lines
+    if (t < firstStart - 0.02) {
+      const topCue = cues[0];
+      const a = this.wordStatesForCue(topCue, t, "upcoming");
+      return {
+        ...empty,
+        cueIndex: 0,
+        pairStart: 0,
+        cue: topCue,
+        next: cues[1] || null,
+        lineA: {
+          cue: topCue,
+          ...a,
+          role: "upcoming",
+        },
         lineB: null,
-        waitingForFirst: false,
-        secondsToFirst: 0,
+        previewIntro: true,
+        waitingForFirst: true,
+        secondsToFirst: firstStart - t,
       };
     }
 
     let idx = this.cueIndexAt(t);
 
-    // First pair visible as soon as music starts
-    if (idx < 0 && t < cues[0].start) {
-      idx = 0;
-    }
-    // Gaps: hold last reached cue
-    if (idx < 0 && t >= cues[0].start) {
+    // Long instrumental / inter-line gap: stay blank until the next cue
+    // (short tails still kept by cueIndexAt's end+0.05 grace)
+    if (idx < 0) {
+      // Between cues or after last
+      let lastEnded = -1;
       for (let i = cues.length - 1; i >= 0; i--) {
-        if (t >= cues[i].start) {
-          idx = i;
+        if (t >= cues[i].end) {
+          lastEnded = i;
           break;
         }
       }
+      // If we're past some cue end and not yet in the next, blank
+      if (lastEnded >= 0) {
+        const next = cues[lastEnded + 1];
+        if (!next || t < next.start - 0.02) {
+          return {
+            ...empty,
+            inGap: true,
+            prev: cues[lastEnded],
+            next: next || null,
+          };
+        }
+      }
+      // Fallback blank rather than forcing line 0
+      return { ...empty, inGap: true };
     }
-    if (idx < 0) idx = 0;
 
     // Pair: (0,1) then (2,3) then (4,5)…
     const pairStart = Math.floor(idx / 2) * 2;
@@ -269,7 +327,8 @@ export class SrtReader {
       wordStates: (idx === pairStart ? a : b)?.wordStates ?? [],
       cueProgress: (idx === pairStart ? a : b)?.cueProgress ?? 0,
       waitingForFirst: false,
-      secondsToFirst: t < cues[0].start ? cues[0].start - t : 0,
+      inGap: false,
+      secondsToFirst: 0,
     };
   }
 
@@ -498,6 +557,137 @@ export class SrtReader {
     if (index < 0 || index >= this.cues.length) return this;
     this.cues.splice(index, 1);
     return this._reindex();
+  }
+
+  /**
+   * Insert a new cue at `index` (0 = before first, length = append).
+   * Auto-fills times from neighboring gaps when start/end omitted —
+   * useful for missing phrases between existing lines.
+   *
+   * @param {number} index 0-based insert position
+   * @param {{ text?: string, start?: number, end?: number }} [opts]
+   * @returns {number} new cue index
+   */
+  insertCueAt(index, opts = {}) {
+    const i = Math.max(0, Math.min(this.cues.length, Number(index) || 0));
+    const text =
+      String(opts.text ?? "New phrase")
+        .replace(/\s+/g, " ")
+        .trim() || "New phrase";
+
+    let start = Number(opts.start);
+    let end = Number(opts.end);
+
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      ({ start, end } = this._suggestInsertTimes(i));
+    }
+
+    start = Math.max(0, start);
+    end = Math.max(start + 0.25, end);
+
+    // If we land on top of the next cue, gently push later cues forward
+    if (i < this.cues.length && end > this.cues[i].start - 0.02) {
+      const push = end + 0.05 - this.cues[i].start;
+      if (push > 0) {
+        for (let j = i; j < this.cues.length; j++) {
+          const c = this.cues[j];
+          c.start += push;
+          c.end += push;
+          for (const w of c.words || []) {
+            w.start += push;
+            w.end += push;
+          }
+        }
+      }
+    }
+
+    // Don't start before previous end
+    if (i > 0) {
+      const prev = this.cues[i - 1];
+      if (start < prev.end) {
+        start = prev.end + 0.02;
+        if (end <= start) end = start + 1.2;
+      }
+    }
+
+    const cue = {
+      index: i + 1,
+      start,
+      end,
+      text,
+      lines: [text],
+      words: placeWeighted(tokenize(text), start, end, i),
+    };
+    this.cues.splice(i, 0, cue);
+    this._reindex();
+    return i;
+  }
+
+  /**
+   * Insert after cue `index` (or append if last).
+   * @param {number} index 0-based cue to insert after
+   * @param {{ text?: string, start?: number, end?: number }} [opts]
+   * @returns {number} new cue index
+   */
+  insertCueAfter(index, opts = {}) {
+    const after = Math.max(-1, Math.min(this.cues.length - 1, Number(index)));
+    return this.insertCueAt(after + 1, opts);
+  }
+
+  /**
+   * Suggest start/end for a cue inserted at position i.
+   * Prefers empty gaps between neighbors for missing phrases.
+   * @param {number} i
+   * @returns {{ start: number, end: number }}
+   */
+  _suggestInsertTimes(i) {
+    if (!this.cues.length) {
+      return { start: 0, end: 2 };
+    }
+
+    // Append after last
+    if (i >= this.cues.length) {
+      const last = this.cues[this.cues.length - 1];
+      const span = Math.max(1.2, Math.min(3, last.end - last.start));
+      const start = last.end + 0.08;
+      return { start, end: start + span };
+    }
+
+    // Before first
+    if (i === 0) {
+      const first = this.cues[0];
+      if (first.start >= 1.2) {
+        const end = Math.max(0.4, first.start - 0.08);
+        const start = Math.max(0, end - Math.min(2.5, first.start * 0.6));
+        return { start, end };
+      }
+      // No room before: squeeze a short intro and push later (handled in insert)
+      return { start: 0, end: 1.2 };
+    }
+
+    // Between prev and next — use the gap (missing phrase case)
+    const prev = this.cues[i - 1];
+    const next = this.cues[i];
+    const gap = next.start - prev.end;
+
+    if (gap >= 0.45) {
+      const pad = Math.min(0.08, gap * 0.1);
+      let start = prev.end + pad;
+      let end = next.start - pad;
+      // Cap very long instrumental gaps to a readable line length
+      if (end - start > 4) {
+        start = prev.end + pad;
+        end = start + 2.5;
+      }
+      if (end - start < 0.35) {
+        end = start + 0.8;
+      }
+      return { start, end };
+    }
+
+    // Tight gap: insert a short line starting at prev.end (will push next)
+    const start = prev.end + 0.04;
+    return { start, end: start + 1.4 };
   }
 
   /** Remove first n cues (junk intros from free generators). */

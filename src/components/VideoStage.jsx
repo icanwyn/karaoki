@@ -4,17 +4,22 @@ import {
   indexForTime,
   lineIndexForWord,
 } from "../lib/lyrics.js";
+import { lyricStyleVars } from "../lib/lyricStyles.js";
 import { stockBackground } from "./UploadPanel.jsx";
+import StageBackground from "./StageBackground.jsx";
 
 const VideoStage = forwardRef(function VideoStage(
   {
-    imageUrl,
+    bgClips = [],
+    isPlaying = false,
     stockImageId,
     words,
     lyrics,
     currentTime,
     isSyncing = false,
     syncIndex = 0,
+    fontId = "modern",
+    colorId = "sakura",
   },
   ref
 ) {
@@ -31,12 +36,22 @@ const VideoStage = forwardRef(function VideoStage(
     [words, lyrics]
   );
 
+  const PREVIEW_LEAD = 5;
   const firstStart = words?.[0]?.start;
+  const tNow = currentTime || 0;
   const beforeLyrics =
     !isSyncing &&
     Number.isFinite(firstStart) &&
     firstStart > 0.15 &&
-    (currentTime || 0) < firstStart - 0.02;
+    tNow < firstStart - 0.02;
+  /** Far intro: only ··· */
+  const showDots =
+    beforeLyrics && Number.isFinite(firstStart) && tNow < firstStart - PREVIEW_LEAD;
+  /** Last 5s before first lyric: show first line only (dim) */
+  const previewFirstLine =
+    beforeLyrics &&
+    Number.isFinite(firstStart) &&
+    tNow >= firstStart - PREVIEW_LEAD;
 
   const activeIndex = useMemo(() => {
     if (!words?.length) return -1;
@@ -50,10 +65,13 @@ const VideoStage = forwardRef(function VideoStage(
     ? Math.min(Math.max(syncIndex, 0), Math.max(0, (words?.length || 1) - 1))
     : activeIndex >= 0
       ? activeIndex
-      : 0;
+      : previewFirstLine
+        ? 0
+        : -1;
 
   const lineIdx = lineIndexForWord(lines, focusIndex);
-  const activeLine = lines[lineIdx];
+  const activeLine = lineIdx >= 0 ? lines[lineIdx] : null;
+  const previewLine = previewFirstLine && lines[0] ? lines[0] : null;
 
   // 0–1 progress through the active word (smooth karaoke fill)
   const wordProgress = useMemo(() => {
@@ -64,25 +82,33 @@ const VideoStage = forwardRef(function VideoStage(
     return Math.max(0, Math.min(1, (t - w.start) / span));
   }, [words, activeIndex, currentTime, isSyncing]);
 
-  const bgStyle = imageUrl
-    ? { backgroundImage: `url(${imageUrl})` }
-    : { backgroundImage: stockBackground(stockImageId) };
-
-  const waitSec =
-    beforeLyrics && Number.isFinite(firstStart)
-      ? Math.max(0, firstStart - (currentTime || 0))
-      : 0;
+  const styleVars = useMemo(
+    () => lyricStyleVars(fontId, colorId),
+    [fontId, colorId]
+  );
+  const fillColor = styleVars["--lyric-highlight-fill"];
+  const hasVisual = (bgClips && bgClips.length > 0) || Boolean(stockImageId);
 
   return (
-    <div className={`video-stage${isSyncing ? " is-syncing" : ""}`} ref={stageRef}>
-      <div className="stage-bg" style={bgStyle} />
+    <div
+      className={`video-stage${isSyncing ? " is-syncing" : ""}`}
+      ref={stageRef}
+      style={styleVars}
+    >
+      <StageBackground
+        clips={bgClips}
+        stockBg={stockBackground(stockImageId)}
+        currentTime={currentTime}
+        isPlaying={isPlaying}
+        className="stage-bg"
+      />
       <canvas ref={canvasRef} width={1280} height={720} style={{ display: "none" }} />
 
-      {!imageUrl && !stockImageId && (
+      {!hasVisual && (
         <div className="stage-placeholder">
           <div>
             <h3>Your stage</h3>
-            <p>Upload a background image or pick a stock backdrop to start the show.</p>
+            <p>Upload images &amp; videos, or pick a stock backdrop to start the show.</p>
           </div>
         </div>
       )}
@@ -94,25 +120,39 @@ const VideoStage = forwardRef(function VideoStage(
       )}
 
       <div className="lyric-bar" aria-live="polite">
-        {beforeLyrics ? (
+        {showDots ? (
           <div className="lyric-line lyric-wait">
-            <span className="kw future">
-              Lyrics start in {waitSec.toFixed(1)}s…
-            </span>
+            <span className="kw future srt-dots">···</span>
           </div>
-        ) : activeLine?.words?.length ? (
+        ) : previewFirstLine && previewLine?.words?.length ? (
+          <div className="lyric-line lyric-preview">
+            {previewLine.words.map((w, i) => (
+              <span key={`p-${i}`} className="kw future">
+                {w.text}
+              </span>
+            ))}
+          </div>
+        ) : isSyncing && activeLine?.words?.length ? (
+          <div className="lyric-line">
+            {activeLine.words.map((w, i) => {
+              const gi = activeLine.startIndex + i;
+              let cls = "kw future";
+              if (gi < syncIndex) cls = "kw past";
+              else if (gi === syncIndex) cls = "kw next";
+              return (
+                <span key={`w-${gi}`} className={cls}>
+                  {w.text}
+                </span>
+              );
+            })}
+          </div>
+        ) : activeIndex >= 0 && activeLine?.words?.length ? (
           <div className="lyric-line">
             {activeLine.words.map((w, i) => {
               const gi = activeLine.startIndex + i;
               let cls = "kw future";
               let fill = 0;
-              if (isSyncing) {
-                if (gi < syncIndex) cls = "kw past";
-                else if (gi === syncIndex) cls = "kw next";
-                else cls = "kw future";
-              } else if (activeIndex < 0) {
-                cls = "kw future";
-              } else if (gi < activeIndex) {
+              if (gi < activeIndex) {
                 cls = "kw past";
                 fill = 1;
               } else if (gi === activeIndex) {
@@ -126,8 +166,7 @@ const VideoStage = forwardRef(function VideoStage(
                   style={
                     cls === "kw active"
                       ? {
-                          // progressive fill left→right through the active word
-                          backgroundImage: `linear-gradient(90deg, rgba(255,45,149,0.35) ${fill * 100}%, transparent ${fill * 100}%)`,
+                          backgroundImage: `linear-gradient(90deg, ${fillColor} ${fill * 100}%, transparent ${fill * 100}%)`,
                         }
                       : undefined
                   }
@@ -137,17 +176,11 @@ const VideoStage = forwardRef(function VideoStage(
               );
             })}
           </div>
-        ) : (
+        ) : !words?.length ? (
           <div className="lyric-line">
-            <span className="kw future">
-              {words?.length
-                ? isSyncing
-                  ? "Tap Space on each word as you hear it"
-                  : "Ready when you are…"
-                : "Add lyrics or auto-generate from your song"}
-            </span>
+            <span className="kw future">Add lyrics or upload an SRT</span>
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

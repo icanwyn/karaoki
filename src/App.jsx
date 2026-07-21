@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import UploadPanel, { STOCK_IMAGES, stockBackground } from "./components/UploadPanel.jsx";
-import LyricsEditor from "./components/LyricsEditor.jsx";
+import UploadPanel, { STOCK_IMAGES, stockBackground, stockImageUrl } from "./components/UploadPanel.jsx";
 import SyncToolbar from "./components/SyncToolbar.jsx";
 import KaraokePlayer from "./components/KaraokePlayer.jsx";
 import VideoStage from "./components/VideoStage.jsx";
 import SrtReaderView from "./components/SrtReaderView.jsx";
 import SrtEditor from "./components/SrtEditor.jsx";
 import EffectsPicker from "./components/EffectsPicker.jsx";
+import StylePicker from "./components/StylePicker.jsx";
 import FallingEffects from "./components/FallingEffects.jsx";
 import ExportPanel from "./components/ExportPanel.jsx";
+import {
+  ensureLyricFontsLoaded,
+  getHighlightColor,
+  getLyricFont,
+} from "./lib/lyricStyles.js";
 import { SrtReader } from "./lib/SrtReader.js";
 import {
   estimateTimings,
@@ -22,7 +27,7 @@ import {
   readShareFromLocation,
   saveProject,
 } from "./lib/storage.js";
-import { exportKaraokeVideo } from "./lib/videoExport.js";
+import { exportKaraokeVideo, getExportPreset } from "./lib/videoExport.js";
 import { UNTAPPED_START } from "./lib/constants.js";
 import { loadSrtFile } from "./lib/syncLyrics.js";
 import { wordsToSrt } from "./lib/srt.js";
@@ -38,12 +43,35 @@ function revokeIfBlob(url) {
   }
 }
 
-/** Paint stock CSS gradient to a PNG data URL for export. */
+/** Paint stock backdrop to a PNG data URL for export. */
 async function stockToDataUrl(stockImageId, width = 1280, height = 720) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
+  const url = stockImageUrl(stockImageId);
+  if (url) {
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.crossOrigin = "anonymous";
+        el.onload = () => resolve(el);
+        el.onerror = reject;
+        el.src = url;
+      });
+      // cover-fit
+      const scale = Math.max(width / img.width, height / img.height);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      ctx.drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+      // soft dim for lyric contrast
+      ctx.fillStyle = "rgba(7, 10, 18, 0.35)";
+      ctx.fillRect(0, 0, width, height);
+      return canvas.toDataURL("image/png");
+    } catch {
+      /* fall through to procedural */
+    }
+  }
   const item = STOCK_IMAGES.find((s) => s.id === stockImageId) || STOCK_IMAGES[0];
   drawProceduralBackdrop(ctx, width, height, item.id);
   return canvas.toDataURL("image/png");
@@ -52,6 +80,9 @@ async function stockToDataUrl(stockImageId, width = 1280, height = 720) {
 function drawProceduralBackdrop(ctx, w, h, id) {
   const g = ctx.createLinearGradient(0, 0, w, h);
   const palettes = {
+    "ink-wash": ["#070a12", "#141820", "#1a2030"],
+    "sakura-dusk": ["#0b1020", "#2a1a28", "#c97b9b"],
+    "matcha-mist": ["#070a12", "#1a2420", "#6f9a72"],
     "neon-city": ["#1a0533", "#4c0519", "#0f172a"],
     "purple-haze": ["#0a0612", "#1a0b2e", "#2e1065"],
     "cyan-wave": ["#020617", "#0e7490", "#2de2e6"],
@@ -59,7 +90,7 @@ function drawProceduralBackdrop(ctx, w, h, id) {
     galaxy: ["#020617", "#1e1b4b", "#4c1d95"],
     velvet: ["#450a0a", "#701a75", "#1e1b4b"],
   };
-  const p = palettes[id] || palettes["neon-city"];
+  const p = palettes[id] || palettes["ink-wash"];
   g.addColorStop(0, p[0]);
   g.addColorStop(0.5, p[1]);
   g.addColorStop(1, p[2]);
@@ -67,9 +98,9 @@ function drawProceduralBackdrop(ctx, w, h, id) {
   ctx.fillRect(0, 0, w, h);
 
   const orbs = [
-    { x: 0.2, y: 0.3, r: 0.35, c: "rgba(255,45,149,0.45)" },
-    { x: 0.8, y: 0.65, r: 0.3, c: "rgba(45,226,230,0.35)" },
-    { x: 0.5, y: 0.15, r: 0.25, c: "rgba(168,85,247,0.35)" },
+    { x: 0.2, y: 0.3, r: 0.35, c: "rgba(232,160,191,0.35)" },
+    { x: 0.8, y: 0.65, r: 0.3, c: "rgba(159,212,216,0.28)" },
+    { x: 0.5, y: 0.15, r: 0.25, c: "rgba(143,188,143,0.22)" },
   ];
   for (const o of orbs) {
     const rg = ctx.createRadialGradient(
@@ -144,21 +175,23 @@ export default function App() {
   const [audioUrl, setAudioUrl] = useState(null);
   const [imageFile, setImageFile] = useState(null);
   const [imageUrl, setImageUrl] = useState(null);
-  const [stockImageId, setStockImageId] = useState("neon-city");
+  const [stockImageId, setStockImageId] = useState("stage-mist");
   const [lyrics, setLyrics] = useState("");
   const [timedWords, setTimedWords] = useState([]);
   /** @type {[import('./lib/SrtReader.js').SrtReader|null, Function]} */
   const [srtReader, setSrtReader] = useState(null);
   /** Snapshot of last uploaded SRT (JSON) so Reset can restore it */
   const [srtBackup, setSrtBackup] = useState(null);
-  const [showSrtEditor, setShowSrtEditor] = useState(false);
   const [stageEffect, setStageEffect] = useState("none");
+  const [lyricFontId, setLyricFontId] = useState("modern");
+  const [highlightColorId, setHighlightColorId] = useState("sakura");
   const [status, setStatus] = useState("edit");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [mode, setMode] = useState("edit");
-  const [offsetMs, setOffsetMs] = useState(0);
+  /** Global offset kept at 0 — edit cue times in Captions instead */
+  const offsetMs = 0;
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncIndex, setSyncIndex] = useState(0);
   const [syncBaseWords, setSyncBaseWords] = useState([]);
@@ -166,9 +199,11 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [downloadUrl, setDownloadUrl] = useState(null);
+  const [downloadExt, setDownloadExt] = useState("mp4");
   const [exportError, setExportError] = useState("");
   const [exportMessage, setExportMessage] = useState("");
   const [shareMessage, setShareMessage] = useState("");
+  const [exportPresetId, setExportPresetId] = useState("youtube1080");
 
   const audioRef = useRef(null);
   const stageRef = useRef(null);
@@ -201,7 +236,6 @@ export default function App() {
     setLyrics(local.lyrics || "");
     setTimedWords(local.timedWords || []);
     if (local.stockImageId) setStockImageId(local.stockImageId);
-    if (local.offset) setOffsetMs(Math.round(local.offset * 1000));
     if (shared) {
       setExportMessage(
         "Loaded project from share link. Re-upload audio & image to play/export."
@@ -376,11 +410,9 @@ export default function App() {
     setTimedWords([]);
     setSrtReader(null);
     setSrtBackup(null);
-    setShowSrtEditor(false);
     setIsSyncing(false);
     setSyncIndex(0);
     setSyncBaseWords([]);
-    setOffsetMs(0);
   }, []);
 
   /** Restore last uploaded SRT + zero offset (undo tap correct / time edits) */
@@ -394,8 +426,7 @@ export default function App() {
       setSrtReader(reader);
       setTimedWords(reader.words);
       setLyrics(reader.lyricsText);
-      setOffsetMs(0);
-      setIsSyncing(false);
+        setIsSyncing(false);
       setSyncIndex(0);
       setExportError("");
       setExportMessage("Reset to uploaded SRT (offset cleared).");
@@ -412,8 +443,7 @@ export default function App() {
     if (!reader || reader.isEmpty) {
       setTimedWords([]);
       setLyrics("");
-      setShowSrtEditor(false);
-      return;
+        return;
     }
     setTimedWords(reader.words);
     setLyrics(reader.lyricsText);
@@ -449,8 +479,7 @@ export default function App() {
         }
         setLyrics(result.lyrics);
         setTimedWords(result.words);
-        setOffsetMs(0);
-        setExportMessage(
+            setExportMessage(
           `✓ ${result.note} Use Reset anytime to restore this upload.`
         );
         setStatus("play");
@@ -838,6 +867,7 @@ export default function App() {
 
   const handleExport = useCallback(async () => {
     if (!canExport || exporting) return;
+    const preset = getExportPreset(exportPresetId);
     setExporting(true);
     setExportProgress(0);
     setExportError("");
@@ -854,7 +884,7 @@ export default function App() {
     try {
       let bgUrl = imageUrl;
       if (!bgUrl) {
-        bgUrl = await stockToDataUrl(stockImageId);
+        bgUrl = await stockToDataUrl(stockImageId, preset.width, preset.height);
       }
       // Drop untapped sentinels if any remain
       const words = applyOffset(
@@ -862,21 +892,43 @@ export default function App() {
         offsetSec
       );
       if (!words.length) {
-        throw new Error("No timed words to export — run Auto lyrics or Tap Sync first.");
+        throw new Error("No timed words to export — upload SRT or Tap Sync first.");
       }
-      const blob = await exportKaraokeVideo({
+      await ensureLyricFontsLoaded(lyricFontId);
+      const font = getLyricFont(lyricFontId);
+      const color = getHighlightColor(highlightColorId);
+      const result = await exportKaraokeVideo({
         imageUrl: bgUrl,
         audioUrl,
         words,
         lyrics,
-        width: 1280,
-        height: 720,
+        width: preset.width,
+        height: preset.height,
+        fps: preset.fps,
+        videoBitsPerSecond: preset.videoBitsPerSecond,
+        audioBitsPerSecond: preset.audioBitsPerSecond,
+        preferMp4: preset.preferMp4,
+        forceM4v: preset.forceM4v,
+        fontFamily: font.canvasFamily,
+        fontWeight: font.weight || "600",
+        highlightHex: color.hex,
+        highlightGlow: color.glow,
         onProgress: setExportProgress,
         signal: ac.signal,
       });
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(result.blob);
       setDownloadUrl(url);
-      setExportMessage("Export ready — download your WebM below.");
+      setDownloadExt(result.ext || "webm");
+      const resLabel = `${result.width}×${result.height}`;
+      const fmt = result.isMp4
+        ? result.ext.toUpperCase()
+        : "WebM";
+      setExportMessage(
+        `Export ready — ${preset.label} (${resLabel}, ${fmt}). Download below.` +
+          (result.isMp4
+            ? " Ready for YouTube / X upload."
+            : " WebM works on YouTube; for X, re-encode to MP4 or try Safari for native M4V.")
+      );
       setStatus("edit");
       setMode("edit");
     } catch (err) {
@@ -901,6 +953,9 @@ export default function App() {
     offsetSec,
     audioUrl,
     lyrics,
+    exportPresetId,
+    lyricFontId,
+    highlightColorId,
   ]);
 
   const handleCancelExport = useCallback(() => {
@@ -935,11 +990,11 @@ export default function App() {
 
   const downloadName = `${(projectTitle || "karaoki")
     .replace(/[^\w\-]+/g, "_")
-    .slice(0, 48)}.webm`;
+    .slice(0, 48)}.${downloadExt || "mp4"}`;
 
   return (
     <div className="app">
-      <header className="app-header">
+      <header className="app-header glass-header">
         <div className="logo" title="Karaoki Studio">
           <div className="logo-mark" aria-hidden="true">
             ♪
@@ -959,6 +1014,19 @@ export default function App() {
         />
 
         <div className="header-actions">
+          <select
+            className="header-export-select"
+            value={exportPresetId}
+            onChange={(e) => setExportPresetId(e.target.value)}
+            disabled={exporting}
+            aria-label="Export quality"
+            title="Export quality"
+          >
+            <option value="hd720">720p HD</option>
+            <option value="youtube1080">1080p YouTube</option>
+            <option value="x1080">1080p for X</option>
+            <option value="youtube4k">4K Ultra</option>
+          </select>
           <button
             type="button"
             className="btn btn-export"
@@ -970,9 +1038,9 @@ export default function App() {
         </div>
       </header>
 
-      <main className="studio studio-clean">
-        <aside className="panel panel-left glass-panel">
-          <div className="panel-body">
+      <main className="studio">
+        <aside className="panel panel-left glass-panel glass-material">
+          <div className="panel-scroll">
             <UploadPanel
               audioFile={audioFile}
               imageFile={imageFile}
@@ -983,15 +1051,13 @@ export default function App() {
               onImage={handleImage}
               onStockImage={handleStockImage}
             />
-            <LyricsEditor
-              onClear={handleClearLyrics}
-              onLoadSrtFile={handleLoadSrtFile}
-              onDownloadSrt={handleDownloadSrt}
-              onOpenEditor={() => setShowSrtEditor(true)}
-              timedCount={timedWords.filter((w) => w.start < UNTAPPED_START / 2).length}
-              hasReader={Boolean(srtReader && !srtReader.isEmpty)}
-            />
             <EffectsPicker value={stageEffect} onChange={setStageEffect} />
+            <StylePicker
+              fontId={lyricFontId}
+              colorId={highlightColorId}
+              onFontChange={setLyricFontId}
+              onColorChange={setHighlightColorId}
+            />
             <SyncToolbar
               isSyncing={isSyncing}
               syncMode={
@@ -1009,8 +1075,6 @@ export default function App() {
                   ? syncBaseWords[syncIndex].text
                   : null
               }
-              offsetMs={offsetMs}
-              onOffsetChange={setOffsetMs}
               onStartSync={handleStartSync}
               onStopSync={handleStopSync}
               onTap={handleTap}
@@ -1020,25 +1084,25 @@ export default function App() {
               hasWords={wordList.length > 0 || timedWords.length > 0}
               hasAutoTimings={hasAutoTimings || Boolean(srtReader && !srtReader.isEmpty)}
             />
-            {(exportError || exportMessage || shareMessage || downloadUrl || exporting) && (
-              <ExportPanel
-                canExport={canExport}
-                exporting={exporting}
-                progress={exportProgress}
-                downloadUrl={downloadUrl}
-                downloadName={downloadName}
-                shareUrl
-                error={exportError}
-                message={exportMessage || shareMessage}
-                onExport={handleExport}
-                onCopyShare={handleCopyShare}
-                onCancel={handleCancelExport}
-              />
-            )}
+            <ExportPanel
+              canExport={canExport}
+              exporting={exporting}
+              progress={exportProgress}
+              downloadUrl={downloadUrl}
+              downloadName={downloadName}
+              shareUrl
+              error={exportError}
+              message={exportMessage || shareMessage}
+              exportPresetId={exportPresetId}
+              onExportPresetChange={setExportPresetId}
+              onExport={handleExport}
+              onCopyShare={handleCopyShare}
+              onCancel={handleCancelExport}
+            />
           </div>
         </aside>
 
-        <section className="panel panel-center glass-panel">
+        <section className="panel panel-center glass-panel stage-panel">
           <div className="stage-wrap">
             {srtReader && !srtReader.isEmpty ? (
               <SrtReaderView
@@ -1050,6 +1114,8 @@ export default function App() {
                 effect={stageEffect}
                 isSyncing={isSyncing}
                 tapTargetIndex={isSyncing ? syncIndex : -1}
+                fontId={lyricFontId}
+                colorId={highlightColorId}
               />
             ) : (
               <div className="stage-with-fx">
@@ -1062,6 +1128,8 @@ export default function App() {
                   currentTime={currentTime}
                   isSyncing={isSyncing}
                   syncIndex={syncIndex}
+                  fontId={lyricFontId}
+                  colorId={highlightColorId}
                 />
                 <FallingEffects effect={stageEffect} />
               </div>
@@ -1079,19 +1147,20 @@ export default function App() {
             />
           </div>
         </section>
+
+        <aside className="panel panel-right glass-panel glass-material">
+          <SrtEditor
+            reader={srtReader}
+            onChange={handleSrtReaderChange}
+            onLoadSrt={handleLoadSrtFile}
+            onDownloadSrt={handleDownloadSrt}
+            onClear={handleClearLyrics}
+            onResetToSrt={handleResetToSrt}
+            canReset={Boolean(srtBackup)}
+          />
+        </aside>
       </main>
 
-      {showSrtEditor && srtReader && (
-        <div className="modal-backdrop" onClick={() => setShowSrtEditor(false)}>
-          <div className="modal-sheet glass-panel" onClick={(e) => e.stopPropagation()}>
-            <SrtEditor
-              reader={srtReader}
-              onChange={handleSrtReaderChange}
-              onClose={() => setShowSrtEditor(false)}
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 }

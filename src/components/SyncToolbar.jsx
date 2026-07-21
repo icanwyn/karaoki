@@ -1,9 +1,7 @@
 /**
- * Offset + corrective tap sync (works with existing auto/SRT timings).
+ * Corrective tap sync (offset removed — edit SRT times in the right panel).
  */
 export default function SyncToolbar({
-  offsetMs,
-  onOffsetChange,
   isSyncing,
   syncMode, // 'corrective' | 'full' | null
   syncIndex,
@@ -19,54 +17,13 @@ export default function SyncToolbar({
   hasAutoTimings = false,
   disabled = false,
 }) {
-  const nudge = (delta) => {
-    onOffsetChange?.(Math.max(-10000, Math.min(10000, (offsetMs || 0) + delta)));
-  };
-
   return (
     <div className={`sync-toolbar glass-card${isSyncing ? " is-active" : ""}`}>
-      <div className="offset-row">
-        <label>
-          <span>Offset</span>
-          <span className="offset-value">
-            {offsetMs > 0 ? `+${offsetMs}` : offsetMs} ms
-          </span>
-        </label>
-        <input
-          type="range"
-          min={-10000}
-          max={10000}
-          step={50}
-          value={offsetMs}
-          onChange={(e) => onOffsetChange?.(Number(e.target.value))}
-          disabled={isSyncing}
-        />
-        <div className="btn-row offset-nudge">
-          <button type="button" className="btn btn-sm" onClick={() => nudge(-500)} disabled={isSyncing || disabled}>
-            −0.5s
-          </button>
-          <button type="button" className="btn btn-sm" onClick={() => nudge(-100)} disabled={isSyncing || disabled}>
-            −0.1s
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm btn-ghost"
-            onClick={() => onOffsetChange?.(0)}
-            disabled={!offsetMs || isSyncing}
-            title="Set global offset back to 0 ms"
-          >
-            Reset offset
-          </button>
-          <button type="button" className="btn btn-sm" onClick={() => nudge(100)} disabled={isSyncing || disabled}>
-            +0.1s
-          </button>
-          <button type="button" className="btn btn-sm" onClick={() => nudge(500)} disabled={isSyncing || disabled}>
-            +0.5s
-          </button>
-        </div>
+      <div className="panel-header panel-header-inline" style={{ paddingBottom: 8 }}>
+        <h2 className="panel-title">Sync</h2>
       </div>
 
-      <div className="btn-row" style={{ marginTop: 10 }}>
+      <div className="btn-row">
         {!isSyncing ? (
           <>
             <button
@@ -87,7 +44,7 @@ export default function SyncToolbar({
               className="btn btn-sm"
               onClick={onResetToSrt}
               disabled={!canResetToSrt || isSyncing || disabled}
-              title="Restore the last uploaded SRT and clear offset"
+              title="Restore the last uploaded SRT"
             >
               Reset to SRT
             </button>
@@ -113,8 +70,8 @@ export default function SyncToolbar({
           {syncMode === "corrective" ? (
             <>
               Press <kbd>Space</kbd> on the <strong>Next</strong> word as you hear it. That word
-              snaps to now, later words shift with it, then it advances to the following word.
-              <kbd>Esc</kbd> / Done saves.
+              snaps to now; later words shift. Edit precise times in Captions. <kbd>Esc</kbd> /
+              Done saves.
             </>
           ) : (
             <>

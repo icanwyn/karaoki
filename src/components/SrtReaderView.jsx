@@ -4,14 +4,16 @@
  */
 import { useMemo } from "react";
 import FallingEffects from "./FallingEffects.jsx";
+import StageBackground from "./StageBackground.jsx";
+import { lyricStyleVars } from "../lib/lyricStyles.js";
 
-function LyricLine({ line, className = "", tapTargetInLine = -1 }) {
+function LyricLine({ line, className = "", tapTargetInLine = -1, fillColor }) {
   if (!line?.cue) return null;
   let states = line.wordStates?.length
     ? line.wordStates.map((w) => ({ ...w }))
     : [{ text: line.cue.text, state: "future", fill: 0 }];
 
-  // During tap-correct: mark the next word to hit as "next" (cyan)
+  // During tap-correct: mark the next word to hit as "next"
   if (tapTargetInLine >= 0 && tapTargetInLine < states.length) {
     states = states.map((w, i) => {
       if (i < tapTargetInLine) return { ...w, state: "past", fill: 1 };
@@ -37,7 +39,7 @@ function LyricLine({ line, className = "", tapTargetInLine = -1 }) {
             style={
               w.state === "active"
                 ? {
-                    backgroundImage: `linear-gradient(90deg, rgba(255,255,255,0.28) ${w.fill * 100}%, transparent ${w.fill * 100}%)`,
+                    backgroundImage: `linear-gradient(90deg, ${fillColor || "rgba(255,255,255,0.28)"} ${w.fill * 100}%, transparent ${w.fill * 100}%)`,
                   }
                 : undefined
             }
@@ -53,14 +55,22 @@ function LyricLine({ line, className = "", tapTargetInLine = -1 }) {
 export default function SrtReaderView({
   reader,
   currentTime = 0,
-  imageUrl,
+  bgClips = [],
+  isPlaying = false,
   stockBg,
   offsetSec = 0,
   effect = "none",
   isSyncing = false,
   tapTargetIndex = -1,
+  fontId = "modern",
+  colorId = "sakura",
 }) {
   const t = (currentTime || 0) + (offsetSec || 0);
+  const styleVars = useMemo(
+    () => lyricStyleVars(fontId, colorId),
+    [fontId, colorId]
+  );
+  const fillColor = styleVars["--lyric-highlight-fill"];
 
   const snap = useMemo(() => {
     if (!reader || reader.isEmpty) return null;
@@ -105,12 +115,6 @@ export default function SrtReaderView({
     );
   }
 
-  const bgStyle = imageUrl
-    ? { backgroundImage: `url(${imageUrl})` }
-    : stockBg
-      ? { backgroundImage: stockBg }
-      : undefined;
-
   const topLineIdx = snap?.pairStart ?? 0;
   const bottomLineIdx = topLineIdx + 1;
   const topTap =
@@ -119,8 +123,15 @@ export default function SrtReaderView({
     tapMap.line === bottomLineIdx ? tapMap.local : -1;
 
   return (
-    <div className="srt-reader srt-reader-minimal">
-      <div className="srt-reader-stage" style={bgStyle}>
+    <div className="srt-reader srt-reader-minimal" style={styleVars}>
+      <div className="srt-reader-stage">
+        <StageBackground
+          clips={bgClips}
+          stockBg={stockBg}
+          currentTime={t}
+          isPlaying={isPlaying}
+          className="stage-bg"
+        />
         <div className="srt-reader-stage-dim" />
         <FallingEffects effect={effect} />
 
@@ -135,19 +146,29 @@ export default function SrtReaderView({
         )}
 
         <div className="srt-reader-main srt-reader-dual">
-          <LyricLine
-            line={snap?.lineA}
-            className="srt-cue-top"
-            tapTargetInLine={topTap}
-          />
-          {snap?.lineB ? (
-            <LyricLine
-              line={snap.lineB}
-              className="srt-cue-bottom"
-              tapTargetInLine={bottomTap}
-            />
-          ) : (
-            <div className="srt-cue srt-cue-bottom srt-cue-spacer" aria-hidden />
+          {snap?.showDots ? (
+            <div className="srt-cue srt-cue-gap" aria-hidden>
+              <span className="srt-dots">···</span>
+            </div>
+          ) : snap?.inGap || !snap?.lineA ? null : (
+            <>
+              <LyricLine
+                line={snap.lineA}
+                className={`srt-cue-top${snap.previewIntro ? " is-preview" : ""}`}
+                tapTargetInLine={topTap}
+                fillColor={fillColor}
+              />
+              {snap.lineB && !snap.previewIntro ? (
+                <LyricLine
+                  line={snap.lineB}
+                  className="srt-cue-bottom"
+                  tapTargetInLine={bottomTap}
+                  fillColor={fillColor}
+                />
+              ) : snap.previewIntro ? null : (
+                <div className="srt-cue srt-cue-bottom srt-cue-spacer" aria-hidden />
+              )}
+            </>
           )}
         </div>
       </div>

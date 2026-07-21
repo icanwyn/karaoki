@@ -316,9 +316,10 @@ export function groupIntoLines(words, rawLyrics) {
  * @param {number} activeIndex
  */
 export function lineIndexForWord(lines, activeIndex) {
-  if (!lines?.length || activeIndex < 0) return 0;
+  // No active word (intro / long gap) → no line — never fall back to line 0
+  if (!lines?.length || activeIndex == null || activeIndex < 0) return -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (activeIndex >= lines[i].startIndex) return i;
   }
-  return 0;
+  return -1;
 }

@@ -92,15 +92,18 @@ export function clipAtTime(clips, t) {
  * @returns {Promise<BgClip>}
  */
 export async function fileToBgClip(file, id, url, imageDefaultSec = 5) {
+  const type = (file?.type || "").toLowerCase();
+  const name = file?.name || "";
   const isVideo =
-    file.type.startsWith("video/") || /\.(mp4|webm|mov|m4v|mkv)$/i.test(file.name);
+    type.startsWith("video/") || /\.(mp4|webm|mov|m4v|mkv|avi)$/i.test(name);
+  // Treat HEIC/unknown image extensions as images (browser may or may not render them)
   if (isVideo) {
     const durationSec = await probeVideoDuration(url, 8);
     return {
       id,
       type: "video",
       url,
-      name: file.name || "video",
+      name: name || "video",
       durationSec,
     };
   }
@@ -108,7 +111,7 @@ export async function fileToBgClip(file, id, url, imageDefaultSec = 5) {
     id,
     type: "image",
     url,
-    name: file.name || "image",
+    name: name || "image",
     durationSec: Math.max(1, Number(imageDefaultSec) || 5),
   };
 }

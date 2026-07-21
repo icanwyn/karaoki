@@ -28,6 +28,10 @@ import {
   saveProject,
 } from "./lib/storage.js";
 import { exportKaraokeVideo, getExportPreset } from "./lib/videoExport.js";
+import {
+  fileToBgClip,
+  makeClipId,
+} from "./lib/bgTimeline.js";
 import { UNTAPPED_START } from "./lib/constants.js";
 import { loadSrtFile } from "./lib/syncLyrics.js";
 import { wordsToSrt } from "./lib/srt.js";
@@ -173,9 +177,12 @@ export default function App() {
   const [projectTitle, setProjectTitle] = useState("Untitled karaoke");
   const [audioFile, setAudioFile] = useState(null);
   const [audioUrl, setAudioUrl] = useState(null);
-  const [imageFile, setImageFile] = useState(null);
-  const [imageUrl, setImageUrl] = useState(null);
-  const [stockImageId, setStockImageId] = useState("stage-mist");
+  /** @type {[import('./lib/bgTimeline.js').BgClip[]]} */
+  const [bgClips, setBgClips] = useState([]);
+  const [defaultImageSec, setDefaultImageSec] = useState(5);
+  const [addingMedia, setAddingMedia] = useState(false);
+  const [stockImageId, setStockImageId] = useState("torii");
+  const hasCustomBg = bgClips.length > 0;
   const [lyrics, setLyrics] = useState("");
   const [timedWords, setTimedWords] = useState([]);
   /** @type {[import('./lib/SrtReader.js').SrtReader|null, Function]} */
@@ -350,20 +357,83 @@ export default function App() {
     });
   }, []);
 
-  const handleImage = useCallback((file) => {
-    setImageFile(file);
-    setImageUrl((prev) => {
-      revokeIfBlob(prev);
-      return URL.createObjectURL(file);
+  const handleAddMediaFiles = useCallback(
+    async (files) => {
+      const list = [...(files || [])];
+      if (!list.length) return;
+      setAddingMedia(true);
+      setExportError("");
+      try {
+        const built = [];
+        for (const file of list) {
+          const id = makeClipId();
+          const url = URL.createObjectURL(file);
+          try {
+            const clip = await fileToBgClip(file, id, url, defaultImageSec);
+            built.push(clip);
+          } catch (err) {
+            revokeIfBlob(url);
+            console.warn("Failed to add media", file?.name, err);
+          }
+        }
+        if (built.length) {
+          setBgClips((prev) => [...prev, ...built].slice(0, 32));
+          setExportMessage(
+            `Added ${built.length} visual clip${built.length === 1 ? "" : "s"} to the timeline.`
+          );
+        } else {
+          setExportError(
+            "Could not add those files. Try JPG/PNG/WebP or MP4/WebM/MOV."
+          );
+        }
+      } finally {
+        setAddingMedia(false);
+      }
+    },
+    [defaultImageSec]
+  );
+
+  const handleRemoveClip = useCallback((id) => {
+    setBgClips((prev) => {
+      const item = prev.find((p) => p.id === id);
+      if (item) revokeIfBlob(item.url);
+      return prev.filter((p) => p.id !== id);
     });
+  }, []);
+
+  const handleClearClips = useCallback(() => {
+    setBgClips((prev) => {
+      prev.forEach((p) => revokeIfBlob(p.url));
+      return [];
+    });
+  }, []);
+
+  const handleMoveClip = useCallback((id, dir) => {
+    setBgClips((prev) => {
+      const i = prev.findIndex((p) => p.id === id);
+      if (i < 0) return prev;
+      const j = i + dir;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = prev.slice();
+      const [row] = next.splice(i, 1);
+      next.splice(j, 0, row);
+      return next;
+    });
+  }, []);
+
+  const handleClipDuration = useCallback((id, sec) => {
+    setBgClips((prev) =>
+      prev.map((c) =>
+        c.id === id ? { ...c, durationSec: Math.max(1, Math.min(600, sec)) } : c
+      )
+    );
   }, []);
 
   const handleStockImage = useCallback((id) => {
     setStockImageId(id);
-    setImageFile(null);
-    setImageUrl((prev) => {
-      revokeIfBlob(prev);
-      return null;
+    setBgClips((prev) => {
+      prev.forEach((p) => revokeIfBlob(p.url));
+      return [];
     });
   }, []);
 
@@ -862,7 +932,7 @@ export default function App() {
   );
 
   const canExport = Boolean(
-    audioUrl && timedWords.length > 0 && (imageUrl || stockImageId)
+    audioUrl && timedWords.length > 0 && (hasCustomBg || stockImageId)
   );
 
   const handleExport = useCallback(async () => {
@@ -882,9 +952,18 @@ export default function App() {
     audioRef.current?.pause();
 
     try {
-      let bgUrl = imageUrl;
-      if (!bgUrl) {
-        bgUrl = await stockToDataUrl(stockImageId, preset.width, preset.height);
+      let exportClips = bgClips.slice();
+      if (!exportClips.length) {
+        const stockUrl = await stockToDataUrl(stockImageId, preset.width, preset.height);
+        exportClips = [
+          {
+            id: "stock",
+            type: "image",
+            url: stockUrl,
+            name: "stock",
+            durationSec: 5,
+          },
+        ];
       }
       // Drop untapped sentinels if any remain
       const words = applyOffset(
@@ -898,7 +977,7 @@ export default function App() {
       const font = getLyricFont(lyricFontId);
       const color = getHighlightColor(highlightColorId);
       const result = await exportKaraokeVideo({
-        imageUrl: bgUrl,
+        bgClips: exportClips,
         audioUrl,
         words,
         lyrics,
@@ -947,7 +1026,7 @@ export default function App() {
     canExport,
     exporting,
     downloadUrl,
-    imageUrl,
+    bgClips,
     stockImageId,
     timedWords,
     offsetSec,
@@ -982,7 +1061,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       revokeIfBlob(audioUrl);
-      revokeIfBlob(imageUrl);
+      bgClips.forEach((p) => revokeIfBlob(p.url));
       revokeIfBlob(downloadUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1043,13 +1122,19 @@ export default function App() {
           <div className="panel-scroll">
             <UploadPanel
               audioFile={audioFile}
-              imageFile={imageFile}
               audioUrl={audioUrl}
-              imageUrl={imageUrl}
+              bgClips={bgClips}
               stockImageId={stockImageId}
+              defaultImageSec={defaultImageSec}
+              addingMedia={addingMedia}
               onAudio={handleAudio}
-              onImage={handleImage}
+              onAddFiles={handleAddMediaFiles}
+              onRemoveClip={handleRemoveClip}
+              onClearClips={handleClearClips}
+              onMoveClip={handleMoveClip}
+              onClipDuration={handleClipDuration}
               onStockImage={handleStockImage}
+              onDefaultImageSec={setDefaultImageSec}
             />
             <EffectsPicker value={stageEffect} onChange={setStageEffect} />
             <StylePicker
@@ -1109,7 +1194,8 @@ export default function App() {
                 reader={srtReader}
                 currentTime={currentTime}
                 offsetSec={offsetSec}
-                imageUrl={imageUrl}
+                bgClips={bgClips}
+                isPlaying={isPlaying}
                 stockBg={stockBackground(stockImageId)}
                 effect={stageEffect}
                 isSyncing={isSyncing}
@@ -1121,7 +1207,8 @@ export default function App() {
               <div className="stage-with-fx">
                 <VideoStage
                   ref={stageRef}
-                  imageUrl={imageUrl}
+                  bgClips={bgClips}
+                  isPlaying={isPlaying}
                   stockImageId={stockImageId}
                   words={displayWords}
                   lyrics={lyrics}

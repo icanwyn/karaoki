@@ -6,22 +6,24 @@ import { timelineDuration } from "../lib/bgTimeline.js";
  */
 export const STOCK_IMAGES = [
   {
-    id: "stage-mist",
-    label: "Stage Mist",
-    url: "/images/stage-mist.jpg",
-    css: "url(/images/stage-mist.jpg) center / cover no-repeat",
-  },
-  {
-    id: "night-garden",
-    label: "Night Garden",
-    url: "/images/stage-night-garden.jpg",
-    css: "url(/images/stage-night-garden.jpg) center / cover no-repeat",
-  },
-  {
     id: "torii",
     label: "Torii Mist",
     url: "/images/torii-mist.jpg",
-    css: "url(/images/torii-mist.jpg) center / cover no-repeat",
+  },
+  {
+    id: "stage-mist",
+    label: "Stage Mist",
+    url: "/images/stage-mist.jpg",
+  },
+  {
+    id: "night-garden",
+    label: "Glass Light",
+    url: "/images/stage-night-garden.jpg",
+  },
+  {
+    id: "washi",
+    label: "Washi",
+    url: "/images/washi.jpg",
   },
   {
     id: "ink-wash",
@@ -41,10 +43,9 @@ export const STOCK_IMAGES = [
 ];
 
 export function stockBackground(stockImageId) {
-  const item = STOCK_IMAGES.find((s) => s.id === stockImageId);
-  if (!item) return STOCK_IMAGES[0].css;
+  const item = STOCK_IMAGES.find((s) => s.id === stockImageId) || STOCK_IMAGES[0];
   if (item.url) return `url(${item.url})`;
-  return item.css || STOCK_IMAGES[0].css;
+  return item.css || `url(/images/torii-mist.jpg)`;
 }
 
 export function stockImageUrl(stockImageId) {
@@ -97,13 +98,28 @@ export default function UploadPanel({
 
   const handleMediaFiles = useCallback(
     (files) => {
-      const list = [...(files || [])].filter(
-        (f) =>
-          f.type.startsWith("image/") ||
-          f.type.startsWith("video/") ||
-          /\.(png|jpe?g|webp|gif|mp4|webm|mov|m4v|mkv)$/i.test(f.name)
-      );
-      if (list.length) onAddFiles?.(list);
+      if (!onAddFiles) {
+        console.error("UploadPanel: onAddFiles is not connected");
+        return;
+      }
+      const list = [...(files || [])].filter((f) => {
+        if (!f) return false;
+        const t = (f.type || "").toLowerCase();
+        const n = f.name || "";
+        // Accept common image/video types, including HEIC from iPhone photos
+        if (t.startsWith("image/") || t.startsWith("video/")) return true;
+        return /\.(png|jpe?g|webp|gif|heic|heif|bmp|mp4|webm|mov|m4v|mkv|avi)$/i.test(
+          n
+        );
+      });
+      if (list.length) {
+        onAddFiles(list);
+      } else if (files?.length) {
+        // Surface rejection so it doesn't feel like a dead click
+        window.alert(
+          "Unsupported file type. Use JPG, PNG, WebP, GIF, MP4, WebM, or MOV."
+        );
+      }
     },
     [onAddFiles]
   );

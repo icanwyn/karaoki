@@ -1,5 +1,14 @@
 import { EXPORT_PRESETS, resolveExportFormat } from "../lib/videoExport.js";
 
+const FADE_OPTIONS = [
+  { value: 0, label: "Off" },
+  { value: 0.5, label: "0.5s" },
+  { value: 1, label: "1s" },
+  { value: 1.5, label: "1.5s" },
+  { value: 2, label: "2s" },
+  { value: 3, label: "3s" },
+];
+
 /** Compact export quality + share row. */
 export default function ExportPanel({
   canExport,
@@ -12,6 +21,10 @@ export default function ExportPanel({
   message,
   exportPresetId = "youtube1080",
   onExportPresetChange,
+  fadeInSec = 1,
+  fadeOutSec = 1,
+  onFadeInChange,
+  onFadeOutChange,
   onExport,
   onCopyShare,
   onCancel,
@@ -55,6 +68,41 @@ export default function ExportPanel({
         >
           {exporting ? `${pct}%` : "Go"}
         </button>
+      </div>
+
+      <div className="export-fade-row">
+        <label className="export-fade-label">
+          <span>Fade in</span>
+          <select
+            className="export-select export-select-sm"
+            value={fadeInSec}
+            onChange={(e) => onFadeInChange?.(Number(e.target.value))}
+            disabled={exporting}
+            aria-label="Fade in duration"
+          >
+            {FADE_OPTIONS.map((o) => (
+              <option key={`in-${o.value}`} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="export-fade-label">
+          <span>Fade out</span>
+          <select
+            className="export-select export-select-sm"
+            value={fadeOutSec}
+            onChange={(e) => onFadeOutChange?.(Number(e.target.value))}
+            disabled={exporting}
+            aria-label="Fade out duration"
+          >
+            {FADE_OPTIONS.map((o) => (
+              <option key={`out-${o.value}`} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       {exporting && (

@@ -2421,3 +2421,23 @@ button:disabled {
   background: rgba(255, 255, 255, 0.12);
   border-radius: 999px;
 }
+
+
+/* Export fade controls */
+.export-fade-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.export-fade-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.export-select-sm {
+  height: 30px;
+  font-size: 0.75rem;
+}

@@ -211,6 +211,8 @@ export default function App() {
   const [exportMessage, setExportMessage] = useState("");
   const [shareMessage, setShareMessage] = useState("");
   const [exportPresetId, setExportPresetId] = useState("youtube1080");
+  const [fadeInSec, setFadeInSec] = useState(1);
+  const [fadeOutSec, setFadeOutSec] = useState(1);
 
   const audioRef = useRef(null);
   const stageRef = useRef(null);
@@ -1002,6 +1004,8 @@ export default function App() {
         fontWeight: font.weight || "600",
         highlightHex: color.hex,
         highlightGlow: color.glow,
+        fadeInSec,
+        fadeOutSec,
         onProgress: setExportProgress,
         signal: ac.signal,
       });
@@ -1043,6 +1047,8 @@ export default function App() {
     audioUrl,
     lyrics,
     exportPresetId,
+    fadeInSec,
+    fadeOutSec,
     lyricFontId,
     highlightColorId,
     srtReader,
@@ -1191,6 +1197,10 @@ export default function App() {
               message={exportMessage || shareMessage}
               exportPresetId={exportPresetId}
               onExportPresetChange={setExportPresetId}
+              fadeInSec={fadeInSec}
+              fadeOutSec={fadeOutSec}
+              onFadeInChange={setFadeInSec}
+              onFadeOutChange={setFadeOutSec}
               onExport={handleExport}
               onCopyShare={handleCopyShare}
               onCancel={handleCancelExport}

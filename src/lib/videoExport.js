@@ -110,9 +110,15 @@ export async function exportKaraokeVideo({
   fontWeight = "600",
   highlightHex = "#e8a0bf",
   highlightGlow = "rgba(232, 160, 191, 0.9)",
+  /** Fade from black at start (seconds). 0 = off */
+  fadeInSec = 0,
+  /** Fade to black at end (seconds). 0 = off */
+  fadeOutSec = 0,
   onProgress,
   signal,
 }) {
+  const fadeIn = Math.max(0, Math.min(8, Number(fadeInSec) || 0));
+  const fadeOut = Math.max(0, Math.min(8, Number(fadeOutSec) || 0));
   /** @type {import('./bgTimeline.js').BgClip[]} */
   let clips = Array.isArray(bgClips)
     ? bgClips.filter((c) => c?.url).map((c) => ({ ...c }))
@@ -221,10 +227,14 @@ export async function exportKaraokeVideo({
 
   const source = audioCtx.createMediaElementSource(audio);
   const dest = audioCtx.createMediaStreamDestination();
+  // Export gain (for fade in/out on the recorded track)
+  const exportGain = audioCtx.createGain();
+  exportGain.gain.value = fadeIn > 0 ? 0 : 1;
   const silentGain = audioCtx.createGain();
   silentGain.gain.value = 0; // no speakers
-  source.connect(dest);
-  source.connect(silentGain);
+  source.connect(exportGain);
+  exportGain.connect(dest);
+  exportGain.connect(silentGain);
   silentGain.connect(audioCtx.destination);
 
   const canvasStream = canvas.captureStream(fps);
@@ -473,6 +483,29 @@ export async function exportKaraokeVideo({
       width * pct,
       Math.max(3, height * 0.0025)
     );
+
+    // Fade in / fade out (black overlay + audio gain)
+    let fadeAlpha = 0;
+    let audioLevel = 1;
+    if (fadeIn > 0 && t < fadeIn) {
+      const u = Math.max(0, Math.min(1, t / fadeIn));
+      fadeAlpha = 1 - u;
+      audioLevel = u;
+    }
+    if (fadeOut > 0 && t > duration - fadeOut) {
+      const u = Math.max(0, Math.min(1, (duration - t) / fadeOut));
+      fadeAlpha = Math.max(fadeAlpha, 1 - u);
+      audioLevel = Math.min(audioLevel, u);
+    }
+    if (fadeAlpha > 0.001) {
+      ctx.fillStyle = `rgba(0,0,0,${Math.min(1, fadeAlpha)})`;
+      ctx.fillRect(0, 0, width, height);
+    }
+    try {
+      exportGain.gain.value = Math.max(0, Math.min(1, audioLevel));
+    } catch {
+      /* ignore */
+    }
   };
 
   try {

@@ -966,8 +966,18 @@ export default function App() {
         ];
       }
       // Drop untapped sentinels if any remain
+      // Prefer live SRT reader words (have line grouping) when available
+      const sourceWords =
+        srtReader && !srtReader.isEmpty
+          ? srtReader.words
+          : timedWords;
       const words = applyOffset(
-        timedWords.filter((w) => w.start < UNTAPPED_START / 2),
+        sourceWords.filter(
+          (w) =>
+            Number.isFinite(w.start) &&
+            w.start < UNTAPPED_START / 2 &&
+            String(w.text || "").trim()
+        ),
         offsetSec
       );
       if (!words.length) {
@@ -1035,6 +1045,7 @@ export default function App() {
     exportPresetId,
     lyricFontId,
     highlightColorId,
+    srtReader,
   ]);
 
   const handleCancelExport = useCallback(() => {

@@ -2441,3 +2441,25 @@ button:disabled {
   height: 30px;
   font-size: 0.75rem;
 }
+
+
+/* Video trim controls */
+.bg-clip-trim {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 4px;
+}
+.bg-clip-trim-hint {
+  font-size: 0.65rem;
+  color: var(--mist-cyan, #9fd4d8);
+  font-weight: 600;
+  opacity: 0.9;
+}
+.bg-clip-row {
+  align-items: flex-start;
+}
+.bg-clip-meta {
+  gap: 6px;
+}

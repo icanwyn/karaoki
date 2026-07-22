@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { timelineDuration } from "../lib/bgTimeline.js";
+import { getClipTrim, timelineDuration } from "../lib/bgTimeline.js";
 
 /**
  * Stock stage backdrops — photographic Japanese-inspired + soft gradient fallbacks.
@@ -75,6 +75,7 @@ export default function UploadPanel({
   onClearClips,
   onMoveClip,
   onClipDuration,
+  onClipTrim,
   onStockImage,
   onDefaultImageSec,
   addingMedia = false,
@@ -213,68 +214,128 @@ export default function UploadPanel({
           </div>
 
           <ul className="bg-clip-list">
-            {bgClips.map((clip, i) => (
-              <li key={clip.id} className="bg-clip-row">
-                <div className="bg-clip-thumb">
-                  {clip.type === "video" ? (
-                    <video src={clip.url} muted playsInline preload="metadata" />
-                  ) : (
-                    <img src={clip.url} alt="" />
-                  )}
-                  <span className={`bg-clip-type bg-clip-type-${clip.type}`}>
-                    {clip.type === "video" ? "VID" : "IMG"}
-                  </span>
-                </div>
-                <div className="bg-clip-meta">
-                  <div className="bg-clip-name" title={clip.name}>
-                    {i + 1}. {clip.name}
+            {bgClips.map((clip, i) => {
+              const trim =
+                clip.type === "video"
+                  ? getClipTrim(clip)
+                  : { start: 0, end: 0, length: 0, source: 0 };
+              return (
+                <li key={clip.id} className="bg-clip-row">
+                  <div className="bg-clip-thumb">
+                    {clip.type === "video" ? (
+                      <video src={clip.url} muted playsInline preload="metadata" />
+                    ) : (
+                      <img src={clip.url} alt="" />
+                    )}
+                    <span className={`bg-clip-type bg-clip-type-${clip.type}`}>
+                      {clip.type === "video" ? "VID" : "IMG"}
+                    </span>
                   </div>
-                  <label className="bg-clip-dur">
-                    <span>Hold</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={600}
-                      step={0.5}
-                      value={Number(clip.durationSec.toFixed(1))}
-                      onChange={(e) =>
-                        onClipDuration?.(clip.id, Math.max(1, Number(e.target.value) || 1))
-                      }
-                    />
-                    <span>s</span>
-                  </label>
-                </div>
-                <div className="bg-clip-actions">
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    disabled={i === 0}
-                    onClick={() => onMoveClip?.(clip.id, -1)}
-                    title="Move earlier"
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    disabled={i === bgClips.length - 1}
-                    onClick={() => onMoveClip?.(clip.id, 1)}
-                    title="Move later"
-                  >
-                    ↓
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost btn-danger"
-                    onClick={() => onRemoveClip?.(clip.id)}
-                    aria-label="Remove"
-                  >
-                    ×
-                  </button>
-                </div>
-              </li>
-            ))}
+                  <div className="bg-clip-meta">
+                    <div className="bg-clip-name" title={clip.name}>
+                      {i + 1}. {clip.name}
+                    </div>
+                    <label className="bg-clip-dur">
+                      <span title="How long this clip stays on the stage timeline">
+                        Hold
+                      </span>
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={600}
+                        step={0.1}
+                        value={Number((clip.durationSec || 1).toFixed(1))}
+                        onChange={(e) =>
+                          onClipDuration?.(
+                            clip.id,
+                            Math.max(0.5, Number(e.target.value) || 0.5)
+                          )
+                        }
+                      />
+                      <span>s</span>
+                    </label>
+                    {clip.type === "video" && (
+                      <div className="bg-clip-trim">
+                        <label className="bg-clip-dur" title="Loop segment start">
+                          <span>In</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={Math.max(0, trim.source - 0.25)}
+                            step={0.1}
+                            value={Number(trim.start.toFixed(1))}
+                            onChange={(e) =>
+                              onClipTrim?.(clip.id, {
+                                trimStartSec: Number(e.target.value),
+                              })
+                            }
+                          />
+                          <span>s</span>
+                        </label>
+                        <label className="bg-clip-dur" title="Loop segment end">
+                          <span>Out</span>
+                          <input
+                            type="number"
+                            min={0.25}
+                            max={trim.source}
+                            step={0.1}
+                            value={Number(trim.end.toFixed(1))}
+                            onChange={(e) =>
+                              onClipTrim?.(clip.id, {
+                                trimEndSec: Number(e.target.value),
+                              })
+                            }
+                          />
+                          <span>s</span>
+                        </label>
+                        <span
+                          className="bg-clip-trim-hint"
+                          title="Trimmed loop length (Hold can be longer to repeat this segment)"
+                        >
+                          Loop {trim.length.toFixed(1)}s
+                          {trim.source
+                            ? ` · file ${trim.source.toFixed(1)}s`
+                            : ""}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-clip-actions">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={i === 0}
+                      onClick={() => onMoveClip?.(clip.id, -1)}
+                      title="Move earlier"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={i === bgClips.length - 1}
+                      onClick={() => onMoveClip?.(clip.id, 1)}
+                      title="Move later"
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost btn-danger"
+                      onClick={() => onRemoveClip?.(clip.id)}
+                      aria-label="Remove"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
+          <p className="hint" style={{ margin: "4px 0 0" }}>
+            Videos: set <strong>In/Out</strong> to the seamless loop segment.{" "}
+            <strong>Hold</strong> is stage time (loops the trim if longer).
+          </p>
 
           <label className="slide-sec-row">
             <span>New images default</span>

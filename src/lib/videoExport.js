@@ -1,4 +1,4 @@
-import { clipAtTime } from "./bgTimeline.js";
+import { clipAtTime, getClipTrim, mediaTimeFromLocalT } from "./bgTimeline.js";
 import { groupIntoLines, indexForTime, lineIndexForWord } from "./lyrics.js";
 
 /**
@@ -176,12 +176,20 @@ export async function exportKaraokeVideo({
     if (clip.type === "video") {
       const v = await loadVideo(clip.url);
       mediaCache.set(clip.id, v);
+      const nat =
+        Number.isFinite(v.duration) && v.duration > 0.2
+          ? Math.min(600, v.duration)
+          : 8;
+      if (!Number.isFinite(clip.sourceDurationSec) || clip.sourceDurationSec < 0.5) {
+        clip.sourceDurationSec = nat;
+      }
+      if (!Number.isFinite(clip.trimEndSec) || clip.trimEndSec <= 0) {
+        clip.trimStartSec = Number(clip.trimStartSec) || 0;
+        clip.trimEndSec = clip.sourceDurationSec;
+      }
       if (!Number.isFinite(clip.durationSec) || clip.durationSec < 0.5) {
-        const nat =
-          Number.isFinite(v.duration) && v.duration > 0.2
-            ? Math.min(600, v.duration)
-            : 8;
-        clip.durationSec = nat;
+        const { length } = getClipTrim(clip);
+        clip.durationSec = length;
       }
     } else {
       mediaCache.set(clip.id, await loadImage(clip.url));
@@ -341,7 +349,8 @@ export async function exportKaraokeVideo({
   };
 
   /**
-   * Smooth BG video: play + loop. Seek only when the active clip changes.
+   * Smooth BG video: play inside trim In/Out; wrap at Out → In for seamless loop.
+   * Seek only on clip switch or when leaving the trim window.
    */
   const ensureBgPlaying = (t) => {
     const hit = clipAtTime(clips, t);
@@ -352,10 +361,12 @@ export async function exportKaraokeVideo({
     if (hit.clip.type === "video" && el instanceof HTMLVideoElement) {
       el.muted = true;
       el.playsInline = true;
-      el.loop = true;
+      el.loop = false; // wrap ourselves at trim bounds
+      const { start, end } = getClipTrim(hit.clip);
+      const mediaTime =
+        hit.mediaTime ?? mediaTimeFromLocalT(hit.clip, hit.localT || 0);
 
       if (activeVideoId !== hit.clip.id) {
-        // Pause previous clip only
         if (activeVideoId) {
           const prev = mediaCache.get(activeVideoId);
           if (prev instanceof HTMLVideoElement) {
@@ -367,16 +378,31 @@ export async function exportKaraokeVideo({
           }
         }
         activeVideoId = hit.clip.id;
-        // One-time start at beginning of this hold (smooth, not per-frame seek)
         try {
-          el.currentTime = 0;
+          el.currentTime = Math.min(Math.max(mediaTime, start), end - 0.05);
         } catch {
           /* ignore */
         }
         el.play().catch(() => {});
-      } else if (el.paused || el.ended) {
-        // Resume without seeking — avoids glitch
-        el.play().catch(() => {});
+      } else {
+        // Stay inside trim window (seamless loop)
+        if (el.currentTime >= end - 0.05 || el.currentTime < start - 0.02) {
+          try {
+            el.currentTime = start;
+          } catch {
+            /* ignore */
+          }
+        } else if (Math.abs((el.currentTime || 0) - mediaTime) > 1.0) {
+          // large drift vs song timeline
+          try {
+            el.currentTime = Math.min(Math.max(mediaTime, start), end - 0.05);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (el.paused || el.ended) {
+          el.play().catch(() => {});
+        }
       }
       return { kind: "video", el };
     }

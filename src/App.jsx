@@ -29,6 +29,7 @@ import {
 } from "./lib/storage.js";
 import { exportKaraokeVideo, getExportPreset } from "./lib/videoExport.js";
 import {
+  applyClipTrim,
   fileToBgClip,
   makeClipId,
 } from "./lib/bgTimeline.js";
@@ -426,8 +427,20 @@ export default function App() {
   const handleClipDuration = useCallback((id, sec) => {
     setBgClips((prev) =>
       prev.map((c) =>
-        c.id === id ? { ...c, durationSec: Math.max(1, Math.min(600, sec)) } : c
+        c.id === id
+          ? { ...c, durationSec: Math.max(0.5, Math.min(600, sec)) }
+          : c
       )
+    );
+  }, []);
+
+  /** Update video In/Out trim; hold syncs to segment length by default */
+  const handleClipTrim = useCallback((id, patch) => {
+    setBgClips((prev) =>
+      prev.map((c) => {
+        if (c.id !== id || c.type !== "video") return c;
+        return applyClipTrim(c, { ...patch, syncHold: true });
+      })
     );
   }, []);
 
@@ -1150,6 +1163,7 @@ export default function App() {
               onClearClips={handleClearClips}
               onMoveClip={handleMoveClip}
               onClipDuration={handleClipDuration}
+              onClipTrim={handleClipTrim}
               onStockImage={handleStockImage}
               onDefaultImageSec={setDefaultImageSec}
             />

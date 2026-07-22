@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { getClipTrim, timelineDuration } from "../lib/bgTimeline.js";
+import VideoTrimEditor from "./VideoTrimEditor.jsx";
 
 /**
  * Stock stage backdrops — photographic Japanese-inspired + soft gradient fallbacks.
@@ -82,6 +83,8 @@ export default function UploadPanel({
 }) {
   const [dragAudio, setDragAudio] = useState(false);
   const [dragVisual, setDragVisual] = useState(false);
+  /** Expanded video loop editor clip id */
+  const [editClipId, setEditClipId] = useState(null);
   const audioInputRef = useRef(null);
   const mediaInputRef = useRef(null);
 
@@ -219,122 +222,136 @@ export default function UploadPanel({
                 clip.type === "video"
                   ? getClipTrim(clip)
                   : { start: 0, end: 0, length: 0, source: 0 };
+              const expanded = editClipId === clip.id && clip.type === "video";
               return (
-                <li key={clip.id} className="bg-clip-row">
-                  <div className="bg-clip-thumb">
-                    {clip.type === "video" ? (
-                      <video src={clip.url} muted playsInline preload="metadata" />
-                    ) : (
-                      <img src={clip.url} alt="" />
-                    )}
-                    <span className={`bg-clip-type bg-clip-type-${clip.type}`}>
-                      {clip.type === "video" ? "VID" : "IMG"}
-                    </span>
-                  </div>
-                  <div className="bg-clip-meta">
-                    <div className="bg-clip-name" title={clip.name}>
-                      {i + 1}. {clip.name}
-                    </div>
-                    <label className="bg-clip-dur">
-                      <span title="How long this clip stays on the stage timeline">
-                        Hold
-                      </span>
-                      <input
-                        type="number"
-                        min={0.5}
-                        max={600}
-                        step={0.1}
-                        value={Number((clip.durationSec || 1).toFixed(1))}
-                        onChange={(e) =>
-                          onClipDuration?.(
-                            clip.id,
-                            Math.max(0.5, Number(e.target.value) || 0.5)
-                          )
-                        }
-                      />
-                      <span>s</span>
-                    </label>
-                    {clip.type === "video" && (
-                      <div className="bg-clip-trim">
-                        <label className="bg-clip-dur" title="Loop segment start">
-                          <span>In</span>
-                          <input
-                            type="number"
-                            min={0}
-                            max={Math.max(0, trim.source - 0.25)}
-                            step={0.1}
-                            value={Number(trim.start.toFixed(1))}
-                            onChange={(e) =>
-                              onClipTrim?.(clip.id, {
-                                trimStartSec: Number(e.target.value),
-                              })
-                            }
-                          />
-                          <span>s</span>
-                        </label>
-                        <label className="bg-clip-dur" title="Loop segment end">
-                          <span>Out</span>
-                          <input
-                            type="number"
-                            min={0.25}
-                            max={trim.source}
-                            step={0.1}
-                            value={Number(trim.end.toFixed(1))}
-                            onChange={(e) =>
-                              onClipTrim?.(clip.id, {
-                                trimEndSec: Number(e.target.value),
-                              })
-                            }
-                          />
-                          <span>s</span>
-                        </label>
-                        <span
-                          className="bg-clip-trim-hint"
-                          title="Trimmed loop length (Hold can be longer to repeat this segment)"
-                        >
-                          Loop {trim.length.toFixed(1)}s
-                          {trim.source
-                            ? ` · file ${trim.source.toFixed(1)}s`
-                            : ""}
+                <li
+                  key={clip.id}
+                  className={`bg-clip-row${expanded ? " is-expanded" : ""}${
+                    clip.type === "video" ? " is-video" : ""
+                  }`}
+                >
+                  <div className="bg-clip-row-main">
+                    <button
+                      type="button"
+                      className="bg-clip-thumb-btn"
+                      onClick={() => {
+                        if (clip.type !== "video") return;
+                        setEditClipId((id) => (id === clip.id ? null : clip.id));
+                      }}
+                      aria-expanded={expanded}
+                      aria-label={
+                        clip.type === "video"
+                          ? expanded
+                            ? `Close loop editor for ${clip.name}`
+                            : `Edit loop for ${clip.name}`
+                          : clip.name
+                      }
+                      disabled={clip.type !== "video"}
+                    >
+                      <div className="bg-clip-thumb">
+                        {clip.type === "video" ? (
+                          <video src={clip.url} muted playsInline preload="metadata" />
+                        ) : (
+                          <img src={clip.url} alt="" />
+                        )}
+                        <span className={`bg-clip-type bg-clip-type-${clip.type}`}>
+                          {clip.type === "video" ? "VID" : "IMG"}
                         </span>
+                        {clip.type === "video" && (
+                          <span className="bg-clip-edit-cue">
+                            {expanded ? "Close" : "Edit loop"}
+                          </span>
+                        )}
                       </div>
-                    )}
+                    </button>
+                    <div className="bg-clip-meta">
+                      <div className="bg-clip-name" title={clip.name}>
+                        {i + 1}. {clip.name}
+                      </div>
+                      {clip.type === "video" ? (
+                        <button
+                          type="button"
+                          className="bg-clip-loop-summary"
+                          onClick={() =>
+                            setEditClipId((id) => (id === clip.id ? null : clip.id))
+                          }
+                        >
+                          <span className="bg-clip-mini-bar" aria-hidden>
+                            <span
+                              style={{
+                                left: `${(trim.start / Math.max(trim.source, 0.01)) * 100}%`,
+                                width: `${(trim.length / Math.max(trim.source, 0.01)) * 100}%`,
+                              }}
+                            />
+                          </span>
+                          Loop {trim.length.toFixed(1)}s · tap to edit
+                        </button>
+                      ) : (
+                        <label className="bg-clip-dur">
+                          <span>Hold</span>
+                          <input
+                            type="number"
+                            min={0.5}
+                            max={600}
+                            step={0.1}
+                            value={Number((clip.durationSec || 1).toFixed(1))}
+                            onChange={(e) =>
+                              onClipDuration?.(
+                                clip.id,
+                                Math.max(0.5, Number(e.target.value) || 0.5)
+                              )
+                            }
+                          />
+                          <span>s</span>
+                        </label>
+                      )}
+                    </div>
+                    <div className="bg-clip-actions">
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={i === 0}
+                        onClick={() => onMoveClip?.(clip.id, -1)}
+                        title="Move earlier"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={i === bgClips.length - 1}
+                        onClick={() => onMoveClip?.(clip.id, 1)}
+                        title="Move later"
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-ghost btn-danger"
+                        onClick={() => {
+                          if (editClipId === clip.id) setEditClipId(null);
+                          onRemoveClip?.(clip.id);
+                        }}
+                        aria-label="Remove"
+                      >
+                        ×
+                      </button>
+                    </div>
                   </div>
-                  <div className="bg-clip-actions">
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={i === 0}
-                      onClick={() => onMoveClip?.(clip.id, -1)}
-                      title="Move earlier"
-                    >
-                      ↑
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={i === bgClips.length - 1}
-                      onClick={() => onMoveClip?.(clip.id, 1)}
-                      title="Move later"
-                    >
-                      ↓
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-ghost btn-danger"
-                      onClick={() => onRemoveClip?.(clip.id)}
-                      aria-label="Remove"
-                    >
-                      ×
-                    </button>
-                  </div>
+                  {expanded && (
+                    <VideoTrimEditor
+                      clip={clip}
+                      onTrim={(patch) => onClipTrim?.(clip.id, patch)}
+                      onDuration={(sec) => onClipDuration?.(clip.id, sec)}
+                      onClose={() => setEditClipId(null)}
+                    />
+                  )}
                 </li>
               );
             })}
           </ul>
           <p className="hint" style={{ margin: "4px 0 0" }}>
-            Videos: set <strong>In/Out</strong> to the seamless loop segment.{" "}
-            <strong>Hold</strong> is stage time (loops the trim if longer).
+            Click a <strong>video</strong> to open the loop editor and drag In/Out.
           </p>
 
           <label className="slide-sec-row">

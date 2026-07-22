@@ -338,20 +338,27 @@ export default function UploadPanel({
                       </button>
                     </div>
                   </div>
-                  {expanded && (
-                    <VideoTrimEditor
-                      clip={clip}
-                      onTrim={(patch) => onClipTrim?.(clip.id, patch)}
-                      onDuration={(sec) => onClipDuration?.(clip.id, sec)}
-                      onClose={() => setEditClipId(null)}
-                    />
-                  )}
                 </li>
               );
             })}
           </ul>
+          {editClipId &&
+            (() => {
+              const editClip = bgClips.find((c) => c.id === editClipId);
+              if (!editClip || editClip.type !== "video") return null;
+              return (
+                <VideoTrimEditor
+                  key={editClip.id}
+                  clip={editClip}
+                  layout="overlay"
+                  onTrim={(patch) => onClipTrim?.(editClip.id, patch)}
+                  onDuration={(sec) => onClipDuration?.(editClip.id, sec)}
+                  onClose={() => setEditClipId(null)}
+                />
+              );
+            })()}
           <p className="hint" style={{ margin: "4px 0 0" }}>
-            Click a <strong>video</strong> to open the loop editor and drag In/Out.
+            Click a <strong>video</strong> to open a large loop editor (drag In/Out).
           </p>
 
           <label className="slide-sec-row">

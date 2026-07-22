@@ -434,12 +434,13 @@ export default function App() {
     );
   }, []);
 
-  /** Update video In/Out trim; hold syncs to segment length by default */
+  /** Update video In/Out trim; hold syncs to loop length unless patch says otherwise */
   const handleClipTrim = useCallback((id, patch) => {
     setBgClips((prev) =>
       prev.map((c) => {
         if (c.id !== id || c.type !== "video") return c;
-        return applyClipTrim(c, { ...patch, syncHold: true });
+        const syncHold = patch?.syncHold !== false;
+        return applyClipTrim(c, { ...patch, syncHold });
       })
     );
   }, []);

@@ -1,7 +1,9 @@
 /**
- * Expanded video loop editor: scrub full source, set In/Out, preview loop.
+ * Video loop editor — large overlay (default) or compact inline panel.
+ * Scrub full source, set In/Out, preview seamless loop.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { getClipTrim } from "../lib/bgTimeline.js";
 
 function fmt(sec) {
@@ -22,12 +24,19 @@ function fmt(sec) {
  *   onTrim: (patch: { trimStartSec?: number, trimEndSec?: number, syncHold?: boolean }) => void,
  *   onDuration?: (sec: number) => void,
  *   onClose: () => void,
+ *   layout?: 'overlay' | 'inline',
  * }} props
  */
-export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
+export default function VideoTrimEditor({
+  clip,
+  onTrim,
+  onDuration,
+  onClose,
+  layout = "overlay",
+}) {
   const videoRef = useRef(null);
   const trackRef = useRef(null);
-  const dragRef = useRef(null); // 'in' | 'out' | 'playhead' | null
+  const dragRef = useRef(null);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -39,7 +48,16 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
   });
   const source = Math.max(trim.source, srcReady || 0.25);
 
-  // Load video + metadata
+  // Lock page scroll when overlay is open
+  useEffect(() => {
+    if (layout !== "overlay") return undefined;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [layout]);
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -47,7 +65,7 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
     v.playsInline = true;
     v.loop = false;
     v.preload = "auto";
-    if (v.src !== clip.url) {
+    if (v.getAttribute("src") !== clip.url && v.src !== clip.url) {
       v.src = clip.url;
       v.load();
     }
@@ -67,7 +85,6 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clip.url, clip.id]);
 
-  // Loop preview: when playing, wrap Out → In
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -86,18 +103,21 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
     return () => v.removeEventListener("timeupdate", onTime);
   }, [playing, trim.start, trim.end]);
 
-  const seekTo = useCallback((t) => {
-    const v = videoRef.current;
-    const clamped = Math.max(0, Math.min(source - 0.02, t));
-    setPlayhead(clamped);
-    if (v) {
-      try {
-        v.currentTime = clamped;
-      } catch {
-        /* ignore */
+  const seekTo = useCallback(
+    (t) => {
+      const v = videoRef.current;
+      const clamped = Math.max(0, Math.min(source - 0.02, t));
+      setPlayhead(clamped);
+      if (v) {
+        try {
+          v.currentTime = clamped;
+        } catch {
+          /* ignore */
+        }
       }
-    }
-  }, [source]);
+    },
+    [source]
+  );
 
   const togglePlay = useCallback(async () => {
     const v = videoRef.current;
@@ -107,7 +127,6 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
       setPlaying(false);
       return;
     }
-    // Start from In if outside window
     if (v.currentTime < trim.start || v.currentTime >= trim.end - 0.05) {
       try {
         v.currentTime = trim.start;
@@ -123,21 +142,21 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
     }
   }, [playing, trim.start, trim.end]);
 
-  const setInAtPlayhead = () => {
+  const setInAtPlayhead = useCallback(() => {
     onTrim?.({
       trimStartSec: Math.min(playhead, trim.end - 0.25),
       trimEndSec: trim.end,
       syncHold: true,
     });
-  };
+  }, [onTrim, playhead, trim.end]);
 
-  const setOutAtPlayhead = () => {
+  const setOutAtPlayhead = useCallback(() => {
     onTrim?.({
       trimStartSec: trim.start,
       trimEndSec: Math.max(playhead, trim.start + 0.25),
       syncHold: true,
     });
-  };
+  }, [onTrim, playhead, trim.start]);
 
   const pct = (t) => `${(Math.max(0, Math.min(1, t / source)) * 100).toFixed(3)}%`;
 
@@ -201,12 +220,28 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
     }
   };
 
-  // Keyboard
+  const stopAndClose = useCallback(() => {
+    const v = videoRef.current;
+    if (v) {
+      try {
+        v.pause();
+      } catch {
+        /* ignore */
+      }
+    }
+    setPlaying(false);
+    onClose?.();
+  }, [onClose]);
+
   useEffect(() => {
     const onKey = (e) => {
+      // Don't steal typing from number inputs
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+
       if (e.key === "Escape") {
         e.preventDefault();
-        onClose?.();
+        stopAndClose();
         return;
       }
       if (e.key === " " || e.code === "Space") {
@@ -235,7 +270,14 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, [
+    playhead,
+    seekTo,
+    setInAtPlayhead,
+    setOutAtPlayhead,
+    stopAndClose,
+    togglePlay,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -250,8 +292,8 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
     };
   }, []);
 
-  return (
-    <div className="video-trim-editor" role="region" aria-label="Loop editor">
+  const editorBody = (
+    <>
       <div className="video-trim-preview-wrap">
         <video
           ref={videoRef}
@@ -348,30 +390,14 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
         >
           Full video
         </button>
-        <button
-          type="button"
-          className="btn btn-sm btn-primary"
-          onClick={() => {
-            const v = videoRef.current;
-            if (v) {
-              try {
-                v.pause();
-              } catch {
-                /* ignore */
-              }
-            }
-            setPlaying(false);
-            onClose?.();
-          }}
-        >
+        <button type="button" className="btn btn-sm btn-primary" onClick={stopAndClose}>
           Done
         </button>
       </div>
 
       <p className="hint video-trim-hint">
-        Drag <strong>In</strong> / <strong>Out</strong> on the bar, or scrub then
-        press <kbd>I</kbd> / <kbd>O</kbd>. Preview plays only the loop.{" "}
-        <kbd>Esc</kbd> closes.
+        Drag <strong>In</strong> / <strong>Out</strong> on the bar, or scrub then press{" "}
+        <kbd>I</kbd> / <kbd>O</kbd>. Preview plays only the loop. <kbd>Esc</kbd> closes.
       </p>
 
       <button
@@ -399,6 +425,46 @@ export default function VideoTrimEditor({ clip, onTrim, onDuration, onClose }) {
           <span>s</span>
         </label>
       )}
+    </>
+  );
+
+  if (layout === "overlay" && typeof document !== "undefined") {
+    return createPortal(
+      <div
+        className="video-trim-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Edit loop · ${clip.name || "video"}`}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) stopAndClose();
+        }}
+      >
+        <div className="video-trim-modal" onClick={(e) => e.stopPropagation()}>
+          <header className="video-trim-modal-head">
+            <div className="video-trim-modal-title">
+              <strong>Edit loop</strong>
+              <span className="video-trim-modal-name" title={clip.name}>
+                {clip.name || "Video"}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={stopAndClose}
+            >
+              Done
+            </button>
+          </header>
+          <div className="video-trim-editor video-trim-editor-overlay">{editorBody}</div>
+        </div>
+      </div>,
+      document.body
+    );
+  }
+
+  return (
+    <div className="video-trim-editor" role="region" aria-label="Loop editor">
+      {editorBody}
     </div>
   );
 }
